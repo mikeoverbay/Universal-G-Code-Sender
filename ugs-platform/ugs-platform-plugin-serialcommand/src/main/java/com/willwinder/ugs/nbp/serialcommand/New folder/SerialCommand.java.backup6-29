@@ -1,0 +1,327 @@
+// CNC Controller Plugin
+package com.willwinder.ugs.nbp.serialcommand;
+
+import com.fazecast.jSerialComm.SerialPort;
+import com.willwinder.universalgcodesender.model.Axis;
+import com.willwinder.universalgcodesender.model.BackendAPI;
+import com.willwinder.universalgcodesender.model.BackendAPIReadOnly;
+import com.willwinder.universalgcodesender.model.Position;
+import com.willwinder.universalgcodesender.model.UnitUtils.Units;
+import com.willwinder.universalgcodesender.services.JogService;
+import com.willwinder.ugs.nbp.lib.lookup.CentralLookup;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.util.Scanner;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import org.openide.modules.OnStart;
+import org.openide.util.lookup.ServiceProvider;
+import org.openide.windows.IOProvider;
+import org.openide.windows.InputOutput;
+
+@OnStart
+@ServiceProvider(service = Runnable.class)
+public class SerialCommand implements Runnable {
+
+    private static final int BAUD_RATE = 9600;
+    private static final long CONNECTION_TIMEOUT_MS = 10000;
+
+    private SerialPort activePort;
+    private OutputStream serialOut;
+    private InputStream inputStream;
+    private Scanner scanner;
+    private boolean connected = false;
+    private JogService jogService;
+    private BackendAPIReadOnly apiReadOnly;
+    private final ByteBuffer buffer = ByteBuffer.allocate(38);
+    private long lastNanoPing = 0;
+
+    static class MachineStatus {
+
+        float x, y, z, a;
+        byte status;
+        float feedRate, stepSize, line, total;
+    }
+
+    public SerialCommand() {
+        this.jogService = null;
+    }
+
+    @Override
+    public void run() {
+        jogService = CentralLookup.getDefault().lookup(JogService.class);
+        new Thread(() -> {
+            InputOutput io = IOProvider.getDefault().getIO("SerialCommand", true);
+            io.select();
+            while (true) {
+                if (!connected) {
+                    startSerialConnection(io);
+                } else {
+                    heartbeatTick(io);
+                }
+                try {
+                    Thread.sleep(100);
+                } catch (InterruptedException ignored) {
+                }
+            }
+        }).start();
+    }
+
+    private void startSerialConnection(InputOutput io) {
+        try {
+            SerialPort selected = null;
+            for (SerialPort port : SerialPort.getCommPorts()) {
+                io.getOut().println("[Scan] Trying port: " + port.getSystemPortName());
+                port.setBaudRate(BAUD_RATE);
+                port.setComPortTimeouts(SerialPort.TIMEOUT_NONBLOCKING, 0, 0);
+                if (!port.openPort()) {
+                    io.getOut().println("[Scan] Failed to open: " + port.getSystemPortName());
+                    continue;
+                }
+
+                Scanner tempScanner = new Scanner(port.getInputStream());
+                Thread.sleep(100);
+                boolean found = false;
+
+                while (tempScanner.hasNextLine()) {
+                    String line = tempScanner.nextLine().trim();
+                    io.getOut().println("[Scan] Read: " + line);
+                    if ("CONREQ".equals(line)) {
+                        serialOut = port.getOutputStream();
+                        serialOut.write("CONACK\n".getBytes());
+                        serialOut.flush();
+                        selected = port;
+                        io.getOut().println("[Handshake] CONACK sent on " + port.getSystemPortName());
+                        found = true;
+                        break;
+                    }
+                }
+
+                if (!found) {
+                    port.closePort();
+                } else {
+                    break;
+                }
+            }
+
+            if (selected == null) {
+                io.getErr().println("[Error] No compatible port found.");
+                return;
+            }
+
+            activePort = selected;
+            serialOut = activePort.getOutputStream();
+            inputStream = activePort.getInputStream();
+            scanner = new Scanner(inputStream);
+            scanner.useDelimiter("\\r?\\n");
+
+            apiReadOnly = CentralLookup.getDefault().lookup(BackendAPIReadOnly.class);
+            connected = true;
+            lastNanoPing = System.currentTimeMillis();
+            io.getOut().println("[Connected] Active port: " + activePort.getSystemPortName());
+
+            CollectStatus(); // Right here.. I want to collectStatus.
+
+        } catch (Exception ex) {
+            io.getErr().println("[Exception] " + ex.getMessage());
+        }
+    }
+
+    public void heartbeatTick(InputOutput io) {
+        if (!connected) {
+            return;
+        }
+
+        try {
+            while (activePort.bytesAvailable() > 0 && scanner.hasNext()) {
+                String line = scanner.next().trim();
+                io.getOut().println("[Recv] " + line);
+                if (line.startsWith("KEY:")) {
+                    Thread.sleep(100);
+                    int code = Integer.parseInt(line.substring(4));
+                    handleCode(code, io);
+                    lastNanoPing = System.currentTimeMillis();
+                } else if ("REQ".equals(line)) {
+                    CollectStatus();
+                    Thread.sleep(100);
+                    PushBuffer();
+                    lastNanoPing = System.currentTimeMillis();
+                } else if ("NANO".equals(line)) {
+                    lastNanoPing = System.currentTimeMillis();
+                    Thread.sleep(100);
+                    serialOut.write("UGS\n".getBytes());
+                    serialOut.flush();
+                }
+            }
+
+            if (System.currentTimeMillis() - lastNanoPing > CONNECTION_TIMEOUT_MS) {
+                connected = false;
+                io.getErr().println("[Timeout] Lost connection to nano.");
+                if (activePort != null) {
+                    activePort.closePort();
+                }
+            }
+        } catch (Exception e) {
+            connected = false;
+            io.getErr().println("[Error] Heartbeat exception: " + e.getMessage());
+        }
+    }
+
+    private void CollectStatus() {
+        Position p = apiReadOnly.getWorkPosition();
+        boolean metric = (jogService.getUnits() == Units.MM);
+
+        double x = p.getX(), y = p.getY(), z = p.getZ(), a = Double.isNaN(p.getA()) ? 0 : p.getA();
+        if (!metric) {
+            x /= 25.4;
+            y /= 25.4;
+            z /= 25.4;
+            a /= 25.4;
+        }
+
+        long total = apiReadOnly.getNumRows();
+        long sent = apiReadOnly.getNumSentRows();
+        int feedRate = jogService.getFeedRate();
+        float stepSize = (float) jogService.getStepSizeXY();
+        byte status = (byte) (apiReadOnly.isPaused() ? 1 : apiReadOnly.isSendingFile() ? 2 : apiReadOnly.isIdle() ? 0 : 3);
+
+        MachineStatus m = new MachineStatus();
+        m.x = (float) x;
+        m.y = (float) y;
+        m.z = (float) z;
+        m.a = (float) a;
+        m.status = status;
+        m.feedRate = (float) feedRate;
+        m.stepSize = stepSize;
+        m.line = (float) sent;
+        m.total = (float) total;
+
+        buffer.clear();
+        buffer.order(ByteOrder.LITTLE_ENDIAN);
+        buffer.put("SYNC\n".getBytes());
+        buffer.putFloat(m.x);
+        buffer.putFloat(m.y);
+        buffer.putFloat(m.z);
+        buffer.putFloat(m.a);
+        buffer.put(m.status);
+        buffer.putFloat(m.feedRate);
+        buffer.putFloat(m.stepSize);
+        buffer.putFloat(m.line);
+        buffer.putFloat(m.total);
+    }
+
+    private void PushBuffer() {
+        if (!connected || apiReadOnly == null) {
+            return;
+        }
+
+        try {
+            if (activePort != null && activePort.bytesAwaitingWrite() > 0) {
+                return;
+            }
+
+            serialOut.write(buffer.array());
+            serialOut.flush();
+
+        } catch (Exception e) {
+            // Handle exception
+        }
+    }
+
+    private void handleCode(int code, InputOutput io) {
+        BackendAPI backend = CentralLookup.getDefault().lookup(BackendAPI.class);
+        JogService jog = CentralLookup.getDefault().lookup(JogService.class);
+        if (backend == null || jog == null) {
+            return;
+        }
+        try {
+            switch (code) {
+                case 0:
+                    jog.adjustManualLocationZ(-1);
+                    break;
+                case 1:
+                    jog.adjustManualLocationABC(-1, 0, 0);
+                    break;
+                case 2:
+                    jog.adjustManualLocationABC(1, 0, 0);
+                    break;
+                case 3:
+                    jog.adjustManualLocationZ(1);
+                    break;
+                case 4:
+                    jog.adjustManualLocationXY(0, -1);
+                    break;
+                case 5:
+                    jog.adjustManualLocationXY(1, 0);
+                    break;
+                case 6:
+                    jog.adjustManualLocationXY(0, 1);
+                    break;
+                case 7:
+                    jog.adjustManualLocationXY(-1, 0);
+                    break;
+                case 8:
+                    setStep(jog, 0.001);
+                    break;
+                case 9:
+                    setStep(jog, 0.010);
+                    break;
+                case 10:
+                    setStep(jog, 0.100);
+                    break;
+                case 11:
+                    setStep(jog, 1.000);
+                    break;
+                case 12:
+                    backend.resetCoordinateToZero(Axis.A);
+                    break;
+                case 13:
+                    backend.resetCoordinateToZero(Axis.Z);
+                    break;
+                case 14:
+                    backend.resetCoordinateToZero(Axis.Y);
+                    break;
+                case 15:
+                    backend.resetCoordinateToZero(Axis.X);
+                    break;
+                case 16:
+                    backend.sendGcodeCommand("G53 G0 A0");
+                    break;
+                case 17:
+                    backend.sendGcodeCommand("G53 G0 Z0");
+                    break;
+                case 18:
+                    backend.sendGcodeCommand("G53 G0 Y0");
+                    break;
+                case 19:
+                    backend.sendGcodeCommand("G53 G0 X0");
+                    break;
+                case 22:
+                    backend.returnToZero();
+                    break;
+                case 23:
+                    backend.performHomingCycle();
+                    break;
+                case 25:
+                    backend.send();
+                    break;
+                case 26:
+                    backend.pauseResume();
+                    break;
+                case 27:
+                    backend.cancel();
+                    break;
+            }
+        } catch (Exception ex) {
+            // Handle exception
+        }
+    }
+
+    private static void setStep(JogService j, double v) {
+        j.setStepSizeZ(v);
+        j.setStepSizeXY(v);
+        j.setStepSizeABC(v);
+    }
+}
