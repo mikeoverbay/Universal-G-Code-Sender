@@ -11,33 +11,14 @@
         <version>${revision}${changelist}</version>
     </parent>
 
-    <groupId>com.willwinder</groupId>
     <artifactId>ugs-platform-plugin-serialcommand</artifactId>
-    <version>2.0-SNAPSHOT</version>
     <packaging>nbm</packaging>
 
-    <name>ugs-platform-plugin-serialcommand</name>
-
     <dependencies>
-        <!-- Serial communication -->
-        <dependency>
-            <groupId>com.fazecast</groupId>
-            <artifactId>jSerialComm</artifactId>
-            <version>2.9.3</version>
-        </dependency>
-
-        <!-- UGS Core backend API -->
-        <dependency>
-            <groupId>com.willwinder</groupId>
-            <artifactId>ugs-core</artifactId>
-            <version>${project.version}</version>
-            <scope>provided</scope>
-        </dependency>
-
         <!-- UGS Platform API -->
         <dependency>
             <groupId>com.willwinder</groupId>
-            <artifactId>ugs-platform-api</artifactId>
+            <artifactId>ugs-platform-ugscore</artifactId>
             <version>${project.version}</version>
             <scope>provided</scope>
         </dependency>
@@ -45,7 +26,7 @@
         <!-- CentralLookup and NetBeans bindings -->
         <dependency>
             <groupId>com.willwinder</groupId>
-            <artifactId>ugs-platform-lib</artifactId>
+            <artifactId>ugs-platform-ugslib</artifactId>
             <version>${project.version}</version>
             <scope>provided</scope>
         </dependency>

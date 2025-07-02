@@ -1,3 +1,6 @@
 Manifest-Version: 1.0
-OpenIDE-Module-Localizing-Bundle: com/mikeoverbay/ugs/platform/plugin/serialcommand/Bundle.properties
+OpenIDE-Module-Localizing-Bundle: com/willwinder/ugs/nbp/serialcommand/Bundle.properties
+OpenIDE-Module-Java-Dependencies: Java > 1.8
+OpenIDE-Module-Specification-Version: ${ugs.modules.specification.version}
+AutoUpdate-Essential-Module: false
 
