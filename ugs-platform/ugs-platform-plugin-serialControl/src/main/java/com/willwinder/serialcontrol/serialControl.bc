@@ -16,7 +16,7 @@ import org.openide.modules.OnStart;
 import org.openide.util.lookup.ServiceProvider;
 import org.openide.windows.IOProvider;
 import org.openide.windows.InputOutput;
-import java.nio.ByteOrder;
+import java.io.IOException;
 
 @OnStart
 @ServiceProvider(service = Runnable.class)
@@ -33,18 +33,16 @@ public class serialControl implements Runnable {
     private JogService jogService;
     private BackendAPI backend;
     private BackendAPIReadOnly apiReadOnly;
-    private static InputOutput io;
-
-
+    private final ByteBuffer buffer = ByteBuffer.allocate(42);
 
     @Override
     public void run() {
         new Thread(this::startSerialConnection, "SerialControl-ConnectionThread").start();
-            io = IOProvider.getDefault().getIO("serialcontrol", false);
-            io.select(); // Only selects once
-   }
+    }
 
     private void startSerialConnection() {
+        InputOutput io = IOProvider.getDefault().getIO("serialcontrol", true);
+        io.select();
 
         try {
             backend = CentralLookup.getDefault().lookup(BackendAPI.class);
@@ -71,7 +69,7 @@ public class serialControl implements Runnable {
                             serialOut = port.getOutputStream();
                             serialOut.write("CONACK\n".getBytes());
                             serialOut.flush();
-                            Thread.sleep(100); // allow stream and Nano time to process
+                            Thread.sleep(100); // allow Nano time to process
                             selected = port;
                             io.getOut().println("[Handshake] CONACK sent on " + port.getSystemPortName());
                             found = true;
@@ -114,17 +112,24 @@ public class serialControl implements Runnable {
                     if (c == '\n') {
                         String line = serialLine.toString().trim();
                         serialLine.setLength(0);
-//                        io.getOut().println("[Recv] " + line);
+                        io.getOut().println("[Recv] " + line);
 
-                        if (line.startsWith("KEY:")) {
+                        if ("NANO".equals(line)) {
+                            lastNanoPing = System.currentTimeMillis();
+
+                            if (activePort.bytesAwaitingWrite() == 0) {
+                                serialOut.write("UGS\n".getBytes());
+                                serialOut.flush();
+                                Thread.sleep(100);
+                            }
+                        } else if (line.startsWith("KEY:")) {
                             int code = Integer.parseInt(line.substring(4));
                             handleCode(code, io);
                             sendSnapshot();
-                            Thread.sleep(30);
+                            Thread.sleep(100);
                         } else if ("REQ".equals(line)) {
-                            lastNanoPing = System.currentTimeMillis();
                             sendSnapshot();
-                            Thread.sleep(30);
+                            Thread.sleep(100);
                         }
                     }
                 }
@@ -136,7 +141,7 @@ public class serialControl implements Runnable {
                     break;
                 }
 
-                Thread.sleep(10);
+                Thread.sleep(30);
             }
 
         } catch (Exception ex) {
@@ -145,29 +150,19 @@ public class serialControl implements Runnable {
         }
     }
 
-    private void writeFloatToBuffer(ByteBuffer buf, float value) {
-        if (Float.isNaN(value)) {
-            value = 0;
-        }
-        buf.order(ByteOrder.LITTLE_ENDIAN);
-        buf.putFloat(value);
-    }
-    private float getFeedRateLive() {
-        float feed = 0;
-        try {
-            String fs = apiReadOnly.getControllerStatus().get("FS");
-            if (fs != null && fs.contains(",")) {
-                String[] parts = fs.split(",");
-                if (parts.length > 0) {
-                    feed = Float.parseFloat(parts[0]);
-                }
-            }
-        } catch (Exception ignored) {}
-        return feed;
+    private void writeFloat(OutputStream out, float value) throws IOException {
+        int intBits = Float.floatToIntBits(value);
+        // Convert to little endian bytes
+        out.write(intBits & 0xFF);
+        out.write((intBits >> 8) & 0xFF);
+        out.write((intBits >> 16) & 0xFF);
+        out.write((intBits >> 24) & 0xFF);
     }
 
     private void sendSnapshot() {
-       
+        if (!connected || serialOut == null || apiReadOnly == null || jogService == null) {
+            return;
+        }
 
         try {
             if (activePort.bytesAwaitingWrite() > 0) {
@@ -208,27 +203,22 @@ public class serialControl implements Runnable {
 
             }
 
-            ByteBuffer packet = ByteBuffer.allocate(40);// 4 bytes for SYNC + 36 bytes(4*9)
-            packet.put((byte) 'S');
-            packet.put((byte) 'Y');
-            packet.put((byte) 'N');
-            packet.put((byte) 'C');
+            serialOut.write("SYNC\n".getBytes());
 
-            writeFloatToBuffer(packet, x);
-            writeFloatToBuffer(packet, y);
-            writeFloatToBuffer(packet, z);
-            writeFloatToBuffer(packet, a);
-            writeFloatToBuffer(packet, status);
-            writeFloatToBuffer(packet, feedRate);
-            writeFloatToBuffer(packet, sent);
-            writeFloatToBuffer(packet, total);
-            writeFloatToBuffer(packet, stepSize);
+            writeFloat(serialOut, 10.0F);
+//            writeFloat(serialOut, y);
+//            writeFloat(serialOut, z);
+//            writeFloat(serialOut, a);
+//            writeFloat(serialOut, status);
+//            writeFloat(serialOut, feedRate);
+//            writeFloat(serialOut, (float) sent);
+//            writeFloat(serialOut, (float) total);
+//            writeFloat(serialOut, stepSize);
 
-            serialOut.write(packet.array());
             serialOut.flush();
 
         } catch (Exception e) {
-
+            // Optionally log error
         }
     }
 
