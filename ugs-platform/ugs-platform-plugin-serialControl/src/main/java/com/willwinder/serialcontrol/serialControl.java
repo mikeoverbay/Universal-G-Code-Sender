@@ -6,286 +6,307 @@ import com.willwinder.universalgcodesender.model.Axis;
 import com.willwinder.universalgcodesender.model.BackendAPI;
 import com.willwinder.universalgcodesender.model.BackendAPIReadOnly;
 import com.willwinder.universalgcodesender.model.Position;
-import com.willwinder.universalgcodesender.model.UGSEvent;
 import com.willwinder.universalgcodesender.model.UnitUtils.Units;
 import com.willwinder.universalgcodesender.services.JogService;
 import com.willwinder.ugs.nbp.lib.lookup.CentralLookup;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
-import java.util.Scanner;
-import java.util.Timer;
-import java.util.TimerTask;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import org.openide.modules.OnStart;
 import org.openide.util.lookup.ServiceProvider;
 import org.openide.windows.IOProvider;
 import org.openide.windows.InputOutput;
+import java.nio.ByteOrder;
 
 @OnStart
 @ServiceProvider(service = Runnable.class)
 public class serialControl implements Runnable {
 
     private static final int BAUD_RATE = 9600;
+    private static final long CONNECTION_TIMEOUT_MS = 10000;
 
     private SerialPort activePort;
     private OutputStream serialOut;
+    private InputStream inputStream;
     private boolean connected = false;
-    private volatile boolean dirty = false;
-    private long lastUpdateTime = 0;
-    private final ExecutorService updateExecutor = Executors.newSingleThreadExecutor();
+    private long lastNanoPing = 0;
     private JogService jogService;
+    private BackendAPI backend;
     private BackendAPIReadOnly apiReadOnly;
-    private Timer heartbeatTimer;
-    private volatile boolean ackReceived = false;
-    private volatile long lastAckSent = 0;
-    private final ByteBuffer buffer = ByteBuffer.allocate(38);
+    private static InputOutput io;
 
-    static class MachineStatus {
-        float x, y, z, a;
-        byte status;
-        float feedRate, line, total;
-        float stepXY;
-    }
 
-    public serialControl() {
-        this.jogService = null;
-    }
 
     @Override
     public void run() {
-        jogService = CentralLookup.getDefault().lookup(JogService.class);
-        new Thread(this::startSerialConnection).start();
-    }
+        new Thread(this::startSerialConnection, "SerialControl-ConnectionThread").start();
+            io = IOProvider.getDefault().getIO("serialcontrol", false);
+            io.select(); // Only selects once
+   }
 
     private void startSerialConnection() {
-        InputOutput io = IOProvider.getDefault().getIO("serialcontrol", true);
-        io.select();
 
         try {
+            backend = CentralLookup.getDefault().lookup(BackendAPI.class);
+            jogService = CentralLookup.getDefault().lookup(JogService.class);
+            apiReadOnly = CentralLookup.getDefault().lookup(BackendAPIReadOnly.class);
+
             SerialPort selected = null;
             for (SerialPort port : SerialPort.getCommPorts()) {
+                io.getOut().println("[Scan] Trying port: " + port.getSystemPortName());
                 port.setBaudRate(BAUD_RATE);
                 port.setComPortTimeouts(SerialPort.TIMEOUT_NONBLOCKING, 0, 0);
                 if (!port.openPort()) {
+                    io.getOut().println("[Scan] Failed to open: " + port.getSystemPortName());
                     continue;
                 }
 
-                Scanner scanner = new Scanner(port.getInputStream());
-                Thread.sleep(100);
-                boolean found = false;
-
-                while (scanner.hasNextLine()) {
-                    String line = scanner.nextLine().trim();
-                    if ("CONREQ".equals(line)) {
-                        serialOut = port.getOutputStream();
-                        serialOut.write("CONACK\n".getBytes());
-                        serialOut.flush();
-                        lastAckSent = System.currentTimeMillis();
-                        selected = port;
-                        found = true;
+                try (java.util.Scanner tempScanner = new java.util.Scanner(port.getInputStream())) {
+                    Thread.sleep(100);
+                    boolean found = false;
+                    while (tempScanner.hasNextLine()) {
+                        String line = tempScanner.nextLine().trim();
+                        io.getOut().println("[Scan] Read: " + line);
+                        if ("CONREQ".equals(line)) {
+                            serialOut = port.getOutputStream();
+                            serialOut.write("CONACK\n".getBytes());
+                            serialOut.flush();
+                            Thread.sleep(100); // allow stream and Nano time to process
+                            selected = port;
+                            io.getOut().println("[Handshake] CONACK sent on " + port.getSystemPortName());
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        port.closePort();
+                    } else {
                         break;
                     }
-                }
-
-                if (!found) {
-                    port.closePort();
-                } else {
-                    break;
                 }
             }
 
             if (selected == null) {
+                io.getErr().println("[Error] No compatible port found.");
                 return;
             }
 
             activePort = selected;
             serialOut = activePort.getOutputStream();
-
-            apiReadOnly = CentralLookup.getDefault().lookup(BackendAPIReadOnly.class);
-            if (apiReadOnly != null) {
-                apiReadOnly.addUGSEventListener(e -> {
-                    InputOutput debugIO = IOProvider.getDefault().getIO("SerialCommand", false);
-                    debugIO.getOut().println("[UGS Event] Received: " + e + " (class: " + e.getClass().getSimpleName() + ")");
-                    scheduleUpdate(false);
-                });
-                dirty = false;
-                lastUpdateTime = 0;
-                scheduleUpdate(false);
-            }
+            inputStream = activePort.getInputStream();
 
             connected = true;
-            startHeartbeat(io);
+            lastNanoPing = System.currentTimeMillis();
 
-        } catch (Exception ex) {
-        }
-    }
+            StringBuilder serialLine = new StringBuilder();
 
-    private void startHeartbeat(InputOutput io) {
-        heartbeatTimer = new Timer();
-        heartbeatTimer.scheduleAtFixedRate(new TimerTask() {
-            @Override
-            public void run() {
-                if (!connected) {
-                    startSerialConnection();
-                    return;
-                } else {
+            while (connected) {
+                while (inputStream.available() > 0) {
+                    int b = inputStream.read();
+                    if (b == -1) {
+                        break;
+                    }
+                    char c = (char) b;
+                    if (c == '\r') {
+                        continue;
+                    }
+                    serialLine.append(c);
+                    if (c == '\n') {
+                        String line = serialLine.toString().trim();
+                        serialLine.setLength(0);
+//                        io.getOut().println("[Recv] " + line);
 
-                    try {
-                        long now = System.currentTimeMillis();
-                        if (serialOut != null) {
-                            serialOut.write("UGS\n".getBytes());
-                            serialOut.flush();
-                            lastAckSent = now;
+                        if (line.startsWith("KEY:")) {
+                            int code = Integer.parseInt(line.substring(4));
+                            handleCode(code, io);
+                            sendSnapshot();
+                            Thread.sleep(30);
+                        } else if ("REQ".equals(line)) {
+                            lastNanoPing = System.currentTimeMillis();
+                            sendSnapshot();
+                            Thread.sleep(30);
                         }
-
-                        if (!ackReceived && (now - lastAckSent > 10000)) {
-                            connected = false;
-                            heartbeatTimer.cancel();
-                            if (activePort != null) {
-                                activePort.closePort();
-                            }
-                            return;
-                        }
-                        ackReceived = false;
-
-                        InputStream in = activePort.getInputStream();
-                        Scanner scanner = new Scanner(in);
-                        scanner.useDelimiter("\\r?\\n");
-
-                        while (activePort.bytesAvailable() > 0 && scanner.hasNext()) {
-                            String line = scanner.next().trim();
-                            if (line.startsWith("KEY:")) {
-                                int code = Integer.parseInt(line.substring(4));
-                                handleCode(code, io);
-                                scheduleUpdate(true);
-                            } else if ("NANO".equals(line)) {
-                                ackReceived = true;
-                            } else if ("REQ".equals(line)) {
-                                scheduleUpdate(true);
-                            }
-                        }
-
-                    } catch (Exception e) {
-                        connected = false;
                     }
                 }
+
+                if (System.currentTimeMillis() - lastNanoPing > CONNECTION_TIMEOUT_MS) {
+                    io.getErr().println("[Timeout] Lost connection to nano.");
+                    connected = false;
+                    activePort.closePort();
+                    break;
+                }
+
+                Thread.sleep(10);
             }
-        }, 0, 20);
-    }
 
-    private void scheduleUpdate() {
-        scheduleUpdate(false);
-    }
-
-    private void scheduleUpdate(boolean force) {
-        CollectStatus();
-        long now = System.currentTimeMillis();
-        if (force || (!dirty && (now - lastUpdateTime >= 300))) {
-            dirty = true;
-            lastUpdateTime = now;
-            updateExecutor.submit(this::PushBuffer);
+        } catch (Exception ex) {
+            io.getErr().println("[Exception] " + ex.getMessage());
+            connected = false;
         }
     }
 
-    private void PushBuffer() {
-        if (!connected || apiReadOnly == null || !dirty) {
-            return;
+    private void writeFloatToBuffer(ByteBuffer buf, float value) {
+        if (Float.isNaN(value)) {
+            value = 0;
         }
+        buf.order(ByteOrder.LITTLE_ENDIAN);
+        buf.putFloat(value);
+    }
+
+    private void sendSnapshot() {
+       
 
         try {
-            if (activePort != null && activePort.bytesAwaitingWrite() > 0) {
+            if (activePort.bytesAwaitingWrite() > 0) {
+                // Previous data still pending, skip this send to avoid flooding
                 return;
             }
 
-            serialOut.write(buffer.array());
+            Position p = apiReadOnly.getWorkPosition();
+            boolean metric = (jogService.getUnits() == Units.MM);
+
+            float x = (float) p.getX();
+            float y = (float) p.getY();
+            float z = (float) p.getZ();
+
+            float a = (float) (Double.isNaN(p.getA()) ? 0 : p.getA());
+            if (!metric) {
+                x /= 25.4;
+                y /= 25.4;
+                z /= 25.4;
+                a /= 25.4;
+            }
+
+            long total = apiReadOnly.getNumRows();
+            long sent = apiReadOnly.getNumSentRows();
+
+            int feedRate = jogService.getFeedRate();
+            float stepSize = (float) jogService.getStepSizeXY();
+
+            float status;
+            if (apiReadOnly.isPaused()) {
+                status = 1;  // paused/hold
+            } else if (apiReadOnly.isSendingFile()) {
+                status = 2;  // running
+            } else if (apiReadOnly.isIdle()) {
+                status = 0;  // idle
+            } else {
+                status = 3;  // busy or other state
+
+            }
+
+            ByteBuffer packet = ByteBuffer.allocate(40);// 4 bytes for SYNC + 36 bytes(4*9)
+            packet.put((byte) 'S');
+            packet.put((byte) 'Y');
+            packet.put((byte) 'N');
+            packet.put((byte) 'C');
+
+            writeFloatToBuffer(packet, x);
+            writeFloatToBuffer(packet, y);
+            writeFloatToBuffer(packet, z);
+            writeFloatToBuffer(packet, a);
+            writeFloatToBuffer(packet, status);
+            writeFloatToBuffer(packet, feedRate);
+            writeFloatToBuffer(packet, sent);
+            writeFloatToBuffer(packet, total);
+            writeFloatToBuffer(packet, stepSize);
+
+            serialOut.write(packet.array());
             serialOut.flush();
-            dirty = false;
 
         } catch (Exception e) {
+
         }
-    }
-
-    private void CollectStatus() {
-        Position p = apiReadOnly.getWorkPosition();
-        boolean metric = (jogService.getUnits() == Units.MM);
-
-        double x = p.getX(), y = p.getY(), z = p.getZ(), a = Double.isNaN(p.getA()) ? 0 : p.getA();
-        if (!metric) {
-            x /= 25.4;
-            y /= 25.4;
-            z /= 25.4;
-            a /= 25.4;
-        }
-
-        long total = apiReadOnly.getNumRows();
-        long sent = apiReadOnly.getNumSentRows();
-        int feedRate = CentralLookup.getDefault().lookup(JogService.class).getFeedRate();
-        float stepXY = (float) jogService.getStepSizeXY();
-        byte status = (byte) (apiReadOnly.isPaused() ? 1 : apiReadOnly.isSendingFile() ? 2 : apiReadOnly.isIdle() ? 0 : 3);
-
-        MachineStatus m = new MachineStatus();
-        m.x = (float) x;
-        m.y = (float) y;
-        m.z = (float) z;
-        m.a = (float) a;
-        m.status = status;
-        m.feedRate = (float) feedRate;
-        m.line = (float) sent;
-        m.total = (float) total;
-        m.stepXY = stepXY;
-
-        buffer.clear();
-        buffer.order(ByteOrder.LITTLE_ENDIAN);
-        buffer.put("SYNC\n".getBytes());
-        buffer.putFloat(Float.intBitsToFloat(Integer.reverseBytes(Float.floatToIntBits(m.x))));
-        buffer.putFloat(Float.intBitsToFloat(Integer.reverseBytes(Float.floatToIntBits(m.y))));
-        buffer.putFloat(Float.intBitsToFloat(Integer.reverseBytes(Float.floatToIntBits(m.z))));
-        buffer.putFloat(Float.intBitsToFloat(Integer.reverseBytes(Float.floatToIntBits(m.a))));
-        buffer.put(m.status);
-        buffer.putFloat(Float.intBitsToFloat(Integer.reverseBytes(Float.floatToIntBits(m.feedRate))));
-        buffer.putFloat(Float.intBitsToFloat(Integer.reverseBytes(Float.floatToIntBits(m.line))));
-        buffer.putFloat(Float.intBitsToFloat(Integer.reverseBytes(Float.floatToIntBits(m.total))));
-        buffer.putFloat(Float.intBitsToFloat(Integer.reverseBytes(Float.floatToIntBits(m.stepXY))));
     }
 
     private void handleCode(int code, InputOutput io) {
-        BackendAPI backend = CentralLookup.getDefault().lookup(BackendAPI.class);
-        JogService jog = CentralLookup.getDefault().lookup(JogService.class);
-        if (backend == null || jog == null) {
+        if (backend == null || jogService == null) {
+            io.getErr().println("[Error] Backend or JogService unavailable.");
             return;
         }
+
         try {
             switch (code) {
-                case 0: jog.adjustManualLocationZ(-1); break;
-                case 1: jog.adjustManualLocationABC(-1, 0, 0); break;
-                case 2: jog.adjustManualLocationABC(1, 0, 0); break;
-                case 3: jog.adjustManualLocationZ(1); break;
-                case 4: jog.adjustManualLocationXY(0, -1); break;
-                case 5: jog.adjustManualLocationXY(1, 0); break;
-                case 6: jog.adjustManualLocationXY(0, 1); break;
-                case 7: jog.adjustManualLocationXY(-1, 0); break;
-                case 8: setStep(jog, 0.001); break;
-                case 9: setStep(jog, 0.010); break;
-                case 10: setStep(jog, 0.100); break;
-                case 11: setStep(jog, 1.000); break;
-                case 12: backend.resetCoordinateToZero(Axis.A); break;
-                case 13: backend.resetCoordinateToZero(Axis.Z); break;
-                case 14: backend.resetCoordinateToZero(Axis.Y); break;
-                case 15: backend.resetCoordinateToZero(Axis.X); break;
-                case 16: backend.sendGcodeCommand("G53 G0 A0"); break;
-                case 17: backend.sendGcodeCommand("G53 G0 Z0"); break;
-                case 18: backend.sendGcodeCommand("G53 G0 Y0"); break;
-                case 19: backend.sendGcodeCommand("G53 G0 X0"); break;
-                case 22: backend.returnToZero(); break;
-                case 23: backend.performHomingCycle(); break;
-                case 25: backend.send(); break;
-                case 26: backend.pauseResume(); break;
-                case 27: backend.cancel(); break;
+                case 0:
+                    jogService.adjustManualLocationZ(-1);
+                    break;
+                case 1:
+                    jogService.adjustManualLocationABC(-1, 0, 0);
+                    break;
+                case 2:
+                    jogService.adjustManualLocationABC(1, 0, 0);
+                    break;
+                case 3:
+                    jogService.adjustManualLocationZ(1);
+                    break;
+                case 4:
+                    jogService.adjustManualLocationXY(0, -1);
+                    break;
+                case 5:
+                    jogService.adjustManualLocationXY(1, 0);
+                    break;
+                case 6:
+                    jogService.adjustManualLocationXY(0, 1);
+                    break;
+                case 7:
+                    jogService.adjustManualLocationXY(-1, 0);
+                    break;
+                case 8:
+                    setStep(jogService, 0.001);
+                    break;
+                case 9:
+                    setStep(jogService, 0.010);
+                    break;
+                case 10:
+                    setStep(jogService, 0.100);
+                    break;
+                case 11:
+                    setStep(jogService, 1.000);
+                    break;
+                case 12:
+                    backend.resetCoordinateToZero(Axis.A);
+                    break;
+                case 13:
+                    backend.resetCoordinateToZero(Axis.Z);
+                    break;
+                case 14:
+                    backend.resetCoordinateToZero(Axis.Y);
+                    break;
+                case 15:
+                    backend.resetCoordinateToZero(Axis.X);
+                    break;
+                case 16:
+                    backend.sendGcodeCommand("G53 G0 A0");
+                    break;
+                case 17:
+                    backend.sendGcodeCommand("G53 G0 Z0");
+                    break;
+                case 18:
+                    backend.sendGcodeCommand("G53 G0 Y0");
+                    break;
+                case 19:
+                    backend.sendGcodeCommand("G53 G0 X0");
+                    break;
+                case 22:
+                    backend.returnToZero();
+                    break;
+                case 23:
+                    backend.performHomingCycle();
+                    break;
+                case 25:
+                    backend.send();
+                    break;
+                case 26:
+                    backend.pauseResume();
+                    break;
+                case 27:
+                    backend.cancel();
+                    break;
+                default:
+                    io.getErr().println("[Warning] Unknown code: " + code);
             }
         } catch (Exception ex) {
+            io.getErr().println("[Error] Handling code " + code + ": " + ex.getMessage());
         }
     }
 
