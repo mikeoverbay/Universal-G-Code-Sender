@@ -77,7 +77,7 @@ public class JogService {
             return 1;
         } else if (size <= 1 && size > 0.1) {
             return 0.1;
-        } else if (size <= 0.1 && size > 0.01) {
+        } else if (size <= 0.1 && size >= 0.01) {
             return 0.01;
         } else if (size <= 0.01 ) {
             return 0.001;

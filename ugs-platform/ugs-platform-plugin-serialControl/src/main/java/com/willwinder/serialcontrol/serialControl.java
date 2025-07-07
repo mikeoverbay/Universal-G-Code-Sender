@@ -6,7 +6,6 @@ import com.willwinder.universalgcodesender.model.Axis;
 import com.willwinder.universalgcodesender.model.BackendAPI;
 import com.willwinder.universalgcodesender.model.BackendAPIReadOnly;
 import com.willwinder.universalgcodesender.model.Position;
-import com.willwinder.universalgcodesender.model.UnitUtils.Units;
 import com.willwinder.universalgcodesender.services.JogService;
 import com.willwinder.ugs.nbp.lib.lookup.CentralLookup;
 import java.io.InputStream;
@@ -17,6 +16,12 @@ import org.openide.util.lookup.ServiceProvider;
 import org.openide.windows.IOProvider;
 import org.openide.windows.InputOutput;
 import java.nio.ByteOrder;
+import com.willwinder.universalgcodesender.model.events.ControllerStatusEvent;
+import com.willwinder.universalgcodesender.model.UnitUtils;
+import com.willwinder.universalgcodesender.model.UnitUtils.Units;
+import com.willwinder.universalgcodesender.listeners.ControllerStatus;
+
+
 
 @OnStart
 @ServiceProvider(service = Runnable.class)
@@ -35,21 +40,42 @@ public class serialControl implements Runnable {
     private BackendAPIReadOnly apiReadOnly;
     private static InputOutput io;
 
-
+    private volatile int liveFeedRate = 0;
+    private volatile int liveSpindleSpeed = 0;
 
     @Override
     public void run() {
         new Thread(this::startSerialConnection, "SerialControl-ConnectionThread").start();
-            io = IOProvider.getDefault().getIO("serialcontrol", false);
-            io.select(); // Only selects once
-   }
+        io = IOProvider.getDefault().getIO("serialcontrol", false);
+        io.select(); // Only selects once
+        backend = CentralLookup.getDefault().lookup(BackendAPI.class);
+        jogService = CentralLookup.getDefault().lookup(JogService.class);
+        apiReadOnly = CentralLookup.getDefault().lookup(BackendAPIReadOnly.class);
+
+        if (apiReadOnly != null) {
+            apiReadOnly.addUGSEventListener(e -> {
+                if (e instanceof ControllerStatusEvent controllerStatusEvent) {
+
+                    ControllerStatus status = controllerStatusEvent.getStatus();
+
+                    // Use real-time values if available, otherwise show the target values.
+                    liveFeedRate = status.getFeedSpeed() != null
+                            ? (int) (status.getFeedSpeed() * UnitUtils.scaleUnits(status.getFeedSpeedUnits(), backend.getSettings().getPreferredUnits()))
+                            : (int) this.backend.getGcodeState().feedRate;
+
+                    liveSpindleSpeed = status.getSpindleSpeed() != null
+                            ? status.getSpindleSpeed().intValue()
+                            : (int) this.backend.getGcodeState().spindleSpeed;
+
+                    //io.getOut().println("[Live] Feed: " + liveFeedRate + " RPM: " + liveSpindleSpeed);
+                }
+            });
+        }
+    }
 
     private void startSerialConnection() {
 
         try {
-            backend = CentralLookup.getDefault().lookup(BackendAPI.class);
-            jogService = CentralLookup.getDefault().lookup(JogService.class);
-            apiReadOnly = CentralLookup.getDefault().lookup(BackendAPIReadOnly.class);
 
             SerialPort selected = null;
             for (SerialPort port : SerialPort.getCommPorts()) {
@@ -152,22 +178,8 @@ public class serialControl implements Runnable {
         buf.order(ByteOrder.LITTLE_ENDIAN);
         buf.putFloat(value);
     }
-    private float getFeedRateLive() {
-        float feed = 0;
-        try {
-            String fs = apiReadOnly.getControllerStatus().get("FS");
-            if (fs != null && fs.contains(",")) {
-                String[] parts = fs.split(",");
-                if (parts.length > 0) {
-                    feed = Float.parseFloat(parts[0]);
-                }
-            }
-        } catch (Exception ignored) {}
-        return feed;
-    }
 
     private void sendSnapshot() {
-       
 
         try {
             if (activePort.bytesAwaitingWrite() > 0) {
@@ -208,7 +220,7 @@ public class serialControl implements Runnable {
 
             }
 
-            ByteBuffer packet = ByteBuffer.allocate(40);// 4 bytes for SYNC + 36 bytes(4*9)
+            ByteBuffer packet = ByteBuffer.allocate(44);// 4 bytes for SYNC + 36 bytes(4*10)
             packet.put((byte) 'S');
             packet.put((byte) 'Y');
             packet.put((byte) 'N');
@@ -223,9 +235,11 @@ public class serialControl implements Runnable {
             writeFloatToBuffer(packet, sent);
             writeFloatToBuffer(packet, total);
             writeFloatToBuffer(packet, stepSize);
+            writeFloatToBuffer(packet, liveFeedRate);
 
             serialOut.write(packet.array());
             serialOut.flush();
+            //io.getOut().println("[Sent Snapshot] FeedRate=" + liveFeedRate + " SpindleSpeed=" + liveSpindleSpeed);
 
         } catch (Exception e) {
 

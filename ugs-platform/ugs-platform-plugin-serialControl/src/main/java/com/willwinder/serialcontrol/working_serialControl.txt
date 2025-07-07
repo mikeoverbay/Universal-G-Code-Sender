@@ -12,11 +12,11 @@ import com.willwinder.ugs.nbp.lib.lookup.CentralLookup;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import org.openide.modules.OnStart;
 import org.openide.util.lookup.ServiceProvider;
 import org.openide.windows.IOProvider;
 import org.openide.windows.InputOutput;
+import java.nio.ByteOrder;
 
 @OnStart
 @ServiceProvider(service = Runnable.class)
@@ -33,16 +33,18 @@ public class serialControl implements Runnable {
     private JogService jogService;
     private BackendAPI backend;
     private BackendAPIReadOnly apiReadOnly;
-    private final ByteBuffer buffer = ByteBuffer.allocate(42);
+    private static InputOutput io;
+
+
 
     @Override
     public void run() {
         new Thread(this::startSerialConnection, "SerialControl-ConnectionThread").start();
-    }
+            io = IOProvider.getDefault().getIO("serialcontrol", false);
+            io.select(); // Only selects once
+   }
 
     private void startSerialConnection() {
-        InputOutput io = IOProvider.getDefault().getIO("serialcontrol", true);
-        io.select();
 
         try {
             backend = CentralLookup.getDefault().lookup(BackendAPI.class);
@@ -69,7 +71,7 @@ public class serialControl implements Runnable {
                             serialOut = port.getOutputStream();
                             serialOut.write("CONACK\n".getBytes());
                             serialOut.flush();
-                            Thread.sleep(100); // allow Nano time to process
+                            Thread.sleep(100); // allow stream and Nano time to process
                             selected = port;
                             io.getOut().println("[Handshake] CONACK sent on " + port.getSystemPortName());
                             found = true;
@@ -101,25 +103,28 @@ public class serialControl implements Runnable {
             while (connected) {
                 while (inputStream.available() > 0) {
                     int b = inputStream.read();
-                    if (b == -1) break;
+                    if (b == -1) {
+                        break;
+                    }
                     char c = (char) b;
-                    if (c == '\r') continue;
+                    if (c == '\r') {
+                        continue;
+                    }
                     serialLine.append(c);
                     if (c == '\n') {
                         String line = serialLine.toString().trim();
                         serialLine.setLength(0);
-                        io.getOut().println("[Recv] " + line);
+//                        io.getOut().println("[Recv] " + line);
 
-                        if ("NANO".equals(line)) {
-                            lastNanoPing = System.currentTimeMillis();
-                            serialOut.write("UGS\n".getBytes());
-                            serialOut.flush();
-                            Thread.sleep(30);
-                        } else if (line.startsWith("KEY:")) {
+                        if (line.startsWith("KEY:")) {
                             int code = Integer.parseInt(line.substring(4));
                             handleCode(code, io);
-                        } else if ("REQ".equals(line)) {
                             sendSnapshot();
+                            Thread.sleep(30);
+                        } else if ("REQ".equals(line)) {
+                            lastNanoPing = System.currentTimeMillis();
+                            sendSnapshot();
+                            Thread.sleep(30);
                         }
                     }
                 }
@@ -140,18 +145,31 @@ public class serialControl implements Runnable {
         }
     }
 
+    private void writeFloatToBuffer(ByteBuffer buf, float value) {
+        if (Float.isNaN(value)) {
+            value = 0;
+        }
+        buf.order(ByteOrder.LITTLE_ENDIAN);
+        buf.putFloat(value);
+    }
+
     private void sendSnapshot() {
-        if (!connected || serialOut == null || apiReadOnly == null || jogService == null) return;
+       
 
         try {
+            if (activePort.bytesAwaitingWrite() > 0) {
+                // Previous data still pending, skip this send to avoid flooding
+                return;
+            }
+
             Position p = apiReadOnly.getWorkPosition();
             boolean metric = (jogService.getUnits() == Units.MM);
 
             float x = (float) p.getX();
             float y = (float) p.getY();
             float z = (float) p.getZ();
-            float a = (float) (Double.isNaN(p.getA()) ? 0 : p.getA());
 
+            float a = (float) (Double.isNaN(p.getA()) ? 0 : p.getA());
             if (!metric) {
                 x /= 25.4;
                 y /= 25.4;
@@ -165,21 +183,39 @@ public class serialControl implements Runnable {
             int feedRate = jogService.getFeedRate();
             float stepSize = (float) jogService.getStepSizeXY();
 
-            buffer.clear();
-            buffer.order(ByteOrder.LITTLE_ENDIAN);
-            buffer.putFloat(x);
-            buffer.putFloat(y);
-            buffer.putFloat(z);
-            buffer.putFloat(a);
-            buffer.putFloat(feedRate);
-            buffer.putFloat(stepSize);
+            float status;
+            if (apiReadOnly.isPaused()) {
+                status = 1;  // paused/hold
+            } else if (apiReadOnly.isSendingFile()) {
+                status = 2;  // running
+            } else if (apiReadOnly.isIdle()) {
+                status = 0;  // idle
+            } else {
+                status = 3;  // busy or other state
 
-            serialOut.write("SYNC\n".getBytes());
-            serialOut.write(buffer.array());
+            }
+
+            ByteBuffer packet = ByteBuffer.allocate(40);// 4 bytes for SYNC + 36 bytes(4*9)
+            packet.put((byte) 'S');
+            packet.put((byte) 'Y');
+            packet.put((byte) 'N');
+            packet.put((byte) 'C');
+
+            writeFloatToBuffer(packet, x);
+            writeFloatToBuffer(packet, y);
+            writeFloatToBuffer(packet, z);
+            writeFloatToBuffer(packet, a);
+            writeFloatToBuffer(packet, status);
+            writeFloatToBuffer(packet, feedRate);
+            writeFloatToBuffer(packet, sent);
+            writeFloatToBuffer(packet, total);
+            writeFloatToBuffer(packet, stepSize);
+
+            serialOut.write(packet.array());
             serialOut.flush();
 
         } catch (Exception e) {
-            // Optionally log error
+
         }
     }
 
@@ -191,31 +227,81 @@ public class serialControl implements Runnable {
 
         try {
             switch (code) {
-                case 0: jogService.adjustManualLocationZ(-1); break;
-                case 1: jogService.adjustManualLocationABC(-1, 0, 0); break;
-                case 2: jogService.adjustManualLocationABC(1, 0, 0); break;
-                case 3: jogService.adjustManualLocationZ(1); break;
-                case 4: jogService.adjustManualLocationXY(0, -1); break;
-                case 5: jogService.adjustManualLocationXY(1, 0); break;
-                case 6: jogService.adjustManualLocationXY(0, 1); break;
-                case 7: jogService.adjustManualLocationXY(-1, 0); break;
-                case 8: setStep(jogService, 0.001); break;
-                case 9: setStep(jogService, 0.010); break;
-                case 10: setStep(jogService, 0.100); break;
-                case 11: setStep(jogService, 1.000); break;
-                case 12: backend.resetCoordinateToZero(Axis.A); break;
-                case 13: backend.resetCoordinateToZero(Axis.Z); break;
-                case 14: backend.resetCoordinateToZero(Axis.Y); break;
-                case 15: backend.resetCoordinateToZero(Axis.X); break;
-                case 16: backend.sendGcodeCommand("G53 G0 A0"); break;
-                case 17: backend.sendGcodeCommand("G53 G0 Z0"); break;
-                case 18: backend.sendGcodeCommand("G53 G0 Y0"); break;
-                case 19: backend.sendGcodeCommand("G53 G0 X0"); break;
-                case 22: backend.returnToZero(); break;
-                case 23: backend.performHomingCycle(); break;
-                case 25: backend.send(); break;
-                case 26: backend.pauseResume(); break;
-                case 27: backend.cancel(); break;
+                case 0:
+                    jogService.adjustManualLocationZ(-1);
+                    break;
+                case 1:
+                    jogService.adjustManualLocationABC(-1, 0, 0);
+                    break;
+                case 2:
+                    jogService.adjustManualLocationABC(1, 0, 0);
+                    break;
+                case 3:
+                    jogService.adjustManualLocationZ(1);
+                    break;
+                case 4:
+                    jogService.adjustManualLocationXY(0, -1);
+                    break;
+                case 5:
+                    jogService.adjustManualLocationXY(1, 0);
+                    break;
+                case 6:
+                    jogService.adjustManualLocationXY(0, 1);
+                    break;
+                case 7:
+                    jogService.adjustManualLocationXY(-1, 0);
+                    break;
+                case 8:
+                    setStep(jogService, 0.001);
+                    break;
+                case 9:
+                    setStep(jogService, 0.010);
+                    break;
+                case 10:
+                    setStep(jogService, 0.100);
+                    break;
+                case 11:
+                    setStep(jogService, 1.000);
+                    break;
+                case 12:
+                    backend.resetCoordinateToZero(Axis.A);
+                    break;
+                case 13:
+                    backend.resetCoordinateToZero(Axis.Z);
+                    break;
+                case 14:
+                    backend.resetCoordinateToZero(Axis.Y);
+                    break;
+                case 15:
+                    backend.resetCoordinateToZero(Axis.X);
+                    break;
+                case 16:
+                    backend.sendGcodeCommand("G53 G0 A0");
+                    break;
+                case 17:
+                    backend.sendGcodeCommand("G53 G0 Z0");
+                    break;
+                case 18:
+                    backend.sendGcodeCommand("G53 G0 Y0");
+                    break;
+                case 19:
+                    backend.sendGcodeCommand("G53 G0 X0");
+                    break;
+                case 22:
+                    backend.returnToZero();
+                    break;
+                case 23:
+                    backend.performHomingCycle();
+                    break;
+                case 25:
+                    backend.send();
+                    break;
+                case 26:
+                    backend.pauseResume();
+                    break;
+                case 27:
+                    backend.cancel();
+                    break;
                 default:
                     io.getErr().println("[Warning] Unknown code: " + code);
             }
