@@ -1,3 +1,6 @@
+Ths adds serialControl.java which allows controlling the machine from a NANO over serial.
+Also, I included the NANO source in the root.
+
 ![Universal G-Code Sender](https://github.com/winder/Universal-G-Code-Sender/raw/master/pictures/ugs_header.png "UGS Splash Image")
 
 
