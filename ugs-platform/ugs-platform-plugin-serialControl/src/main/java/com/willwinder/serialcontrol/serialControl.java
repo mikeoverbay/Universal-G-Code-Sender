@@ -43,8 +43,20 @@ public class serialControl implements Runnable {
     private volatile int liveFeedRate = 0;
     private volatile int liveSpindleSpeed = 0;
 
+    /* -------------------------------------------------- */
+    /*  Helper                                             */
+    /* -------------------------------------------------- */
+    private static void initIO() {
+        if (io == null) {
+            io = IOProvider.getDefault().getIO("serialcontrol", false);
+            io.select(); // show tab once
+        }
+    }
+
     @Override
     public void run() {
+         // Ensure IO is ready **before** starting serial thread
+        initIO();
         new Thread(this::startSerialConnection, "SerialControl-ConnectionThread").start();
         io = IOProvider.getDefault().getIO("serialcontrol", false);
         io.select(); // Only selects once
@@ -88,7 +100,7 @@ public class serialControl implements Runnable {
                 }
 
                 try (java.util.Scanner tempScanner = new java.util.Scanner(port.getInputStream())) {
-                    Thread.sleep(100);
+                    Thread.sleep(2000);
                     boolean found = false;
                     while (tempScanner.hasNextLine()) {
                         String line = tempScanner.nextLine().trim();
@@ -195,7 +207,7 @@ public class serialControl implements Runnable {
             float z = (float) p.getZ();
 
             float a = (float) (Double.isNaN(p.getA()) ? 0 : p.getA());
-            if (!metric) {
+            if (metric) {
                 x /= 25.4;
                 y /= 25.4;
                 z /= 25.4;
