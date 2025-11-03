@@ -24,11 +24,16 @@ import java.io.File;
 public class XyzFileFilter extends FileFilter {
     @Override
     public boolean accept(File f) {
-        return f.isFile() && (f.getName().endsWith(".xyz") || f.getName().endsWith(".txt"));
+        // ✅ always show directories so you can navigate
+        if (f.isDirectory()) {
+            return true;
+        }
+        // ✅ accept all files (no extension filtering)
+        return true;
     }
 
     @Override
     public String getDescription() {
-        return "MeshLab (.xyz)";
+        return "All files (*.*)";
     }
 }

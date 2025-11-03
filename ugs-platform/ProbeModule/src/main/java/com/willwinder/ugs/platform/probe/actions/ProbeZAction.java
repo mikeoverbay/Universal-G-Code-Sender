@@ -28,8 +28,10 @@ import org.openide.awt.ActionID;
 import org.openide.awt.ActionReference;
 import org.openide.awt.ActionReferences;
 import org.openide.awt.ActionRegistration;
-import org.openide.util.ImageUtilities;
 import org.openide.util.Lookup;
+import org.openide.DialogDisplayer;
+import org.openide.NotifyDescriptor;
+import org.openide.util.ImageUtilities;
 
 @ActionID(
         category = LocalizingService.CATEGORY_MACHINE,
@@ -56,22 +58,68 @@ public class ProbeZAction extends AbstractProbeAction {
         putValue(NAME, Localization.getString("probe.action.z"));
     }
 
-    @Override
-    public void performProbeAction() {
-        ProbeService probeService = Lookup.getDefault().lookup(ProbeService.class);
-        ProbeParameters pc = new ProbeParameters(
-                ProbeSettings.getSettingsProbeDiameter(), getBackend().getMachinePosition(),
-                0., 0., ProbeSettings.getzDistance(),
-                0., 0., ProbeSettings.getzOffset(),
-                0.0,
-                ProbeSettings.getSettingsFastFindRate(), ProbeSettings.getSettingsSlowMeasureRate(),
-                ProbeSettings.getSettingsRetractAmount(), ProbeSettings.getSettingsDelayAfterRetract(), getBackend().getSettings().getPreferredUnits(), ProbeSettings.getSettingsWorkCoordinate());
+@Override
+public void performProbeAction() {
+    ProbeService probeService = Lookup.getDefault().lookup(ProbeService.class);
 
-        ProbePreviewManager probePreviewManager = Lookup.getDefault().lookup(ProbePreviewManager.class);
-        probePreviewManager.updateContext(pc, getBackend().getWorkPosition(), getBackend().getMachinePosition());
-
-        probeService.performZProbe(pc);
+    // Get current position
+    double z;
+    try {
+        z = getBackend().getWorkPosition().getZ();
+    } catch (Exception ex) {
+        DialogDisplayer.getDefault().notify(new NotifyDescriptor.Message(
+            "Could not read current Z position. Aborting probe.",
+            NotifyDescriptor.ERROR_MESSAGE));
+        return;
     }
+
+    // Read probe range settings
+    double zMin = ProbeSettings.getzDistance();
+    double zMax = 0.0;
+
+    if (z < zMin) {
+        DialogDisplayer.getDefault().notify(new NotifyDescriptor.Message(
+            String.format("Current Z (%.3f) is below Z-Min (%.3f). Aborting probe.", z, zMin),
+            NotifyDescriptor.ERROR_MESSAGE));
+        return;
+    }
+
+    if (z > zMax) {
+        DialogDisplayer.getDefault().notify(new NotifyDescriptor.Message(
+            String.format("Current Z (%.3f) is above Z-Max (%.3f). Aborting probe.", z, zMax),
+            NotifyDescriptor.WARNING_MESSAGE));
+        return;
+    }
+
+    if ((zMax - zMin) < 0.050) {
+        DialogDisplayer.getDefault().notify(new NotifyDescriptor.Message(
+            String.format("Z probe range is very small (%.3f in). Aborting probe.", zMax - zMin),
+            NotifyDescriptor.WARNING_MESSAGE));
+        return;
+    }
+
+    // Build probe config
+    ProbeParameters pc = new ProbeParameters(
+        ProbeSettings.getSettingsProbeDiameter(),
+        getBackend().getMachinePosition(),
+        0., 0., ProbeSettings.getzDistance(),
+        0., 0., ProbeSettings.getzOffset(),
+        0.0,
+        ProbeSettings.getSettingsFastFindRate(),
+        ProbeSettings.getSettingsSlowMeasureRate(),
+        ProbeSettings.getSettingsRetractAmount(),
+        ProbeSettings.getSettingsDelayAfterRetract(),
+        getBackend().getSettings().getPreferredUnits(),
+        ProbeSettings.getSettingsWorkCoordinate()
+    );
+
+    // Update preview
+    ProbePreviewManager probePreviewManager = Lookup.getDefault().lookup(ProbePreviewManager.class);
+    probePreviewManager.updateContext(pc, getBackend().getWorkPosition(), getBackend().getMachinePosition());
+
+    // Run probe
+    probeService.performZProbe(pc);
+}
 
     @Override
     public String getProbeConfirmationText() {

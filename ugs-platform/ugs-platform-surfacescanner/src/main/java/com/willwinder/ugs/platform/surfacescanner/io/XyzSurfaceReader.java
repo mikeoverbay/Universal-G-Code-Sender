@@ -35,18 +35,30 @@ import java.util.stream.Collectors;
 public class XyzSurfaceReader implements SurfaceReader {
 
     @Override
-    public List<Position> read(InputStream inputStream) throws IOException {
-        BackendAPI backendAPI = CentralLookup.getDefault().lookup(BackendAPI.class);
-        UnitUtils.Units preferredUnits = backendAPI.getSettings().getPreferredUnits();
+public List<Position> read(InputStream inputStream) throws IOException {
+    BackendAPI backendAPI = CentralLookup.getDefault().lookup(BackendAPI.class);
+    UnitUtils.Units preferredUnits = backendAPI.getSettings().getPreferredUnits();
 
-        String data = IOUtils.toString(inputStream, Charset.defaultCharset());
-        List<Position> positions = Arrays.stream(StringUtils.split(data, "\n"))
-                .map(line -> {
-                    String[] s = StringUtils.split(line, " ");
-                    return new Position(Double.parseDouble(s[0]), Double.parseDouble(s[1]), Double.parseDouble(s[2]), preferredUnits);
-                })
-                .collect(Collectors.toList());
+    String data = IOUtils.toString(inputStream, Charset.defaultCharset());
+    List<Position> positions = Arrays.stream(StringUtils.split(data, "\n"))
+            .map(String::trim)
+            .filter(line -> !line.isEmpty())
+            .filter(line -> !line.startsWith("#"))   // ✅ skip comment lines
+            .map(line -> {
+                String[] s = StringUtils.split(line, " ");
+                if (s.length < 3) {
+                    throw new IllegalArgumentException("Invalid XYZ line: " + line);
+                }
+                return new Position(
+                        Double.parseDouble(s[0]),
+                        Double.parseDouble(s[1]),
+                        Double.parseDouble(s[2]),
+                        preferredUnits
+                );
+            })
+            .collect(Collectors.toList());
 
-        return positions;
-    }
+    return positions;
+}
+
 }

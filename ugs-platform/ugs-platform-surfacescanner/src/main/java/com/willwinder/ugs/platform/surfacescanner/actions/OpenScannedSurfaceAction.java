@@ -20,6 +20,7 @@ package com.willwinder.ugs.platform.surfacescanner.actions;
 
 import com.willwinder.ugs.nbp.lib.lookup.CentralLookup;
 import com.willwinder.ugs.platform.surfacescanner.SurfaceScanner;
+import com.willwinder.ugs.platform.surfacescanner.Utils; // <-- for extractMetadataValue
 import static com.willwinder.ugs.platform.surfacescanner.Utils.getMaxPosition;
 import static com.willwinder.ugs.platform.surfacescanner.Utils.getMinPosition;
 import static com.willwinder.ugs.platform.surfacescanner.Utils.shouldEraseProbedData;
@@ -49,6 +50,7 @@ import java.util.List;
 import java.util.Optional;
 
 public class OpenScannedSurfaceAction extends AbstractAction implements UGSEventListener {
+
     public static final String ICON_BASE = "com/willwinder/ugs/platform/surfacescanner/icons/open.svg";
 
     private final SurfaceScanner surfaceScanner;
@@ -68,7 +70,6 @@ public class OpenScannedSurfaceAction extends AbstractAction implements UGSEvent
         putValue("iconBase", ICON_BASE);
         putValue(SMALL_ICON, ImageUtilities.loadImageIcon(ICON_BASE, false));
     }
-
 
     @Override
     public boolean isEnabled() {
@@ -90,11 +91,43 @@ public class OpenScannedSurfaceAction extends AbstractAction implements UGSEvent
         }
 
         try {
+            // 1) Read header lines first to pull out xSamples / ySamples (simple & robust)
+            List<String> allLines = Files.readAllLines(file.get().toPath());
+            int xSamplesFromHeader = 0;
+            int ySamplesFromHeader = 0;
+            for (String line : allLines) {
+                String trimmed = line.trim();
+                if (!trimmed.startsWith("#")) {
+                    // stop processing headers, switch to point data
+                    continue;
+                }
+                String xCount = Utils.extractMetadataValue(trimmed, "xSamples");
+                if (xCount != null) {
+                    try {
+                        xSamplesFromHeader = Integer.parseInt(xCount);
+                    } catch (NumberFormatException ignored) {
+                    }
+                }
+                String yCount = Utils.extractMetadataValue(trimmed, "ySamples");
+                if (yCount != null) {
+                    try {
+                        ySamplesFromHeader = Integer.parseInt(yCount);
+                    } catch (NumberFormatException ignored) {
+                    }
+                }
+
+            }
+
+            // 2) Parse positions (the reader should ignore '#' lines)
             XyzSurfaceReader surfaceReader = new XyzSurfaceReader();
             List<Position> positions = surfaceReader.read(Files.newInputStream(file.get().toPath()));
 
-            updateSettings(backend.getSettings().getAutoLevelSettings(), positions);
+            // 3) Update settings (use header counts if present; fallback to distinct counts)
+            updateSettings(backend.getSettings().getAutoLevelSettings(), positions, xSamplesFromHeader, ySamplesFromHeader);
+
+            // 4) Fill the scanner’s grid with the loaded Z data
             updatePoints(positions);
+
         } catch (IOException | NumberFormatException ex) {
             GUIHelpers.displayErrorDialog("Could not read the scanned point file, check the log file for more information.");
             throw new RuntimeException(ex);
@@ -113,7 +146,8 @@ public class OpenScannedSurfaceAction extends AbstractAction implements UGSEvent
         while (nextProbePoint.isPresent()) {
             Position probePoint = nextProbePoint.get();
             Position probedPosition = positions.stream()
-                    .filter(p -> MathUtils.isEqual(p.getX(), probePoint.getX(), 0.01) && MathUtils.isEqual(p.getY(), probePoint.getY(), 0.01))
+                    .filter(p -> MathUtils.isEqual(p.getX(), probePoint.getX(), 0.01)
+                    && MathUtils.isEqual(p.getY(), probePoint.getY(), 0.01))
                     .findFirst()
                     .orElseThrow(() -> new IllegalStateException("The supplied file is missing height data for grid point: " + probePoint));
 
@@ -122,14 +156,27 @@ public class OpenScannedSurfaceAction extends AbstractAction implements UGSEvent
         }
     }
 
-    private void updateSettings(AutoLevelSettings autoLevelSettings, List<Position> positions) {
+    // Overload that accepts optional header counts; falls back to inferred counts
+    private void updateSettings(AutoLevelSettings autoLevelSettings,
+            List<Position> positions,
+            int xSamplesFromHeader,
+            int ySamplesFromHeader) {
+
         Position minPosition = getMinPosition(positions);
         Position maxPosition = getMaxPosition(positions);
         autoLevelSettings.setMin(minPosition);
         autoLevelSettings.setMax(maxPosition);
 
-        double stepResolution = positions.get(1).getY() - positions.get(0).getY();
-        autoLevelSettings.setStepResolution(stepResolution);
+        int xSamples = xSamplesFromHeader > 0
+                ? xSamplesFromHeader
+                : (int) positions.stream().mapToDouble(Position::getX).distinct().count();
+
+        int ySamples = ySamplesFromHeader > 0
+                ? ySamplesFromHeader
+                : (int) positions.stream().mapToDouble(Position::getY).distinct().count();
+
+        autoLevelSettings.setXSampleCount(xSamples);
+        autoLevelSettings.setYSampleCount(ySamples);
 
         surfaceScanner.update(minPosition, maxPosition);
         surfaceScanner.reset();

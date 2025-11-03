@@ -90,8 +90,14 @@ public class Utils {
         // Step 1: Convert arcs to line segments.
         result.add(new ArcExpander(true, autoLevelSettings.getAutoLevelArcSliceLength(), GcodePreprocessorUtils.getDecimalFormatter()));
 
-        // Step 2: Line splitter. No line should be longer than some fraction of "resolution"
-        result.add(new LineSplitter(autoLevelSettings.getStepResolution() / 4));
+		double stepResX = (autoLevelSettings.getMaxX() - autoLevelSettings.getMinX()) /
+						  Math.max(1, autoLevelSettings.getXSampleCount() - 1);
+		double stepResY = (autoLevelSettings.getMaxY() - autoLevelSettings.getMinY()) /
+						  Math.max(1, autoLevelSettings.getYSampleCount() - 1);
+		double avgRes = (stepResX + stepResY) / 2.0;
+
+		result.add(new LineSplitter(avgRes / 4));
+
 
         // Step 3: Adjust Z heights codes based on mesh offsets.
         result.add(
@@ -99,4 +105,16 @@ public class Utils {
                         surfaceScanner.getProbePositionGrid()));
         return result;
     }
+	public static String extractMetadataValue(String line, String key) {
+    if (line.startsWith("#")) {
+        String[] parts = line.substring(1).trim().split("\\s+");
+        for (String part : parts) {
+            if (part.startsWith(key + "=")) {
+                return part.substring((key + "=").length());
+            }
+        }
+    }
+    return null;
+}
+
 }

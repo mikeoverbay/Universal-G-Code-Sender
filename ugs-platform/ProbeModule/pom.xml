@@ -19,6 +19,32 @@
                 <artifactId>nbm-maven-plugin</artifactId>
                 <extensions>true</extensions>
                 <configuration>
+                    <moduleDependencies>
+                        <module>
+                            <id>org.netbeans.api:org-netbeans-api-annotations-common</id>
+                            <explicitValue>org.netbeans.api.annotations.common/1</explicitValue>
+                        </module>
+                        <module>
+                            <id>org.openide:org-openide-awt</id>
+                            <explicitValue>org.openide.awt/1</explicitValue>
+                        </module>
+                        <module>
+                            <id>org.openide:org-openide-dialogs</id>
+                            <explicitValue>org.openide.dialogs/1</explicitValue>
+                        </module>
+                        <module>
+                            <id>org.openide:org-openide-util</id>
+                            <explicitValue>org.openide.util/9</explicitValue>
+                        </module>
+                        <module>
+                            <id>org.openide:org-openide-util-lookup</id>
+                            <explicitValue>org.openide.util.lookup/1</explicitValue>
+                        </module>
+                        <module>
+                            <id>org.openide:org-openide-windows</id>
+                            <explicitValue>org.openide.windows/2</explicitValue>
+                        </module>
+                    </moduleDependencies>
                     <publicPackages>
                     </publicPackages>
                 </configuration>
@@ -26,6 +52,12 @@
         </plugins>
     </build>
     <dependencies>
+        <dependency>
+            <groupId>org.netbeans.api</groupId>
+            <artifactId>org-openide-dialogs</artifactId>
+            <version>${netbeans.version}</version>
+        </dependency>
+
         <dependency>
             <groupId>org.netbeans.api</groupId>
             <artifactId>org-netbeans-api-annotations-common</artifactId>

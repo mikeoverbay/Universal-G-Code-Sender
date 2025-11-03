@@ -9,25 +9,15 @@ public class AutoLevelSettings implements Serializable {
 
     private double autoLevelProbeZeroHeight = 0;
     private Position autoLevelProbeOffset = Position.ZERO;
-    /**
-     * How long the arcs segments should be expanded in millimeters
-     */
+
     private double autoLevelArcSliceLength = 0.01;
-
-    /**
-     * The fast probe scan rate in mm/min
-     */
     private double probeScanFeedRate = 1000;
-
-    /**
-     * Probe speed in mm/min
-     */
     private double probeSpeed = 10;
-    // Main window
-    private double stepResolution = 1;
-    /**
-     * Sets the corner for the minimum position to scan during auto leveling
-     */
+
+    // Replaced stepResolution
+    private int xSampleCount = 5;
+    private int ySampleCount = 5;
+
     private double minX = 0.0;
     private double minY = 0.0;
     private double minZ = 0.0;
@@ -35,9 +25,6 @@ public class AutoLevelSettings implements Serializable {
     private double maxY = 1.0;
     private double maxZ = 1.0;
 
-    /**
-     * The precentage of the maxZ to retract from the previous probe position
-     */
     private double zRetract = 1.0;
     private double zSurface = 0;
 
@@ -52,7 +39,21 @@ public class AutoLevelSettings implements Serializable {
     }
 
     public boolean equals(AutoLevelSettings obj) {
-        return this.minX == obj.minX && this.minY == obj.minY && this.minZ == obj.minZ && this.maxX == obj.maxX && this.maxY == obj.maxY && this.maxZ == obj.maxZ && this.autoLevelProbeZeroHeight == obj.autoLevelProbeZeroHeight && Objects.equals(this.autoLevelProbeOffset, obj.autoLevelProbeOffset) && this.autoLevelArcSliceLength == obj.autoLevelArcSliceLength && this.stepResolution == obj.stepResolution && this.probeSpeed == obj.probeSpeed && this.probeScanFeedRate == obj.probeScanFeedRate && this.zRetract == obj.zRetract && this.zSurface == obj.zSurface;
+        return this.minX == obj.minX
+                && this.minY == obj.minY
+                && this.minZ == obj.minZ
+                && this.maxX == obj.maxX
+                && this.maxY == obj.maxY
+                && this.maxZ == obj.maxZ
+                && this.autoLevelProbeZeroHeight == obj.autoLevelProbeZeroHeight
+                && Objects.equals(this.autoLevelProbeOffset, obj.autoLevelProbeOffset)
+                && this.autoLevelArcSliceLength == obj.autoLevelArcSliceLength
+                && this.probeSpeed == obj.probeSpeed
+                && this.probeScanFeedRate == obj.probeScanFeedRate
+                && this.zRetract == obj.zRetract
+                && this.zSurface == obj.zSurface
+                && this.xSampleCount == obj.xSampleCount
+                && this.ySampleCount == obj.ySampleCount;
     }
 
     public void setSettingChangeListener(SettingChangeListener settingChangeListener) {
@@ -131,18 +132,6 @@ public class AutoLevelSettings implements Serializable {
         }
     }
 
-
-    public double getStepResolution() {
-        return stepResolution;
-    }
-
-    public void setStepResolution(double stepResolution) {
-        if (this.stepResolution != stepResolution) {
-            this.stepResolution = stepResolution;
-            changed();
-        }
-    }
-
     public double getZRetract() {
         return Math.min(Math.max(0.01, zRetract), 1.0);
     }
@@ -203,7 +192,7 @@ public class AutoLevelSettings implements Serializable {
     }
 
     public void setAutoLevelProbeOffset(Position autoLevelProbeOffset) {
-        if (this.autoLevelProbeOffset != autoLevelProbeOffset) {
+        if (!Objects.equals(this.autoLevelProbeOffset, autoLevelProbeOffset)) {
             this.autoLevelProbeOffset = autoLevelProbeOffset;
             changed();
         }
@@ -231,6 +220,28 @@ public class AutoLevelSettings implements Serializable {
         }
     }
 
+    public int getXSampleCount() {
+        return xSampleCount;
+    }
+
+    public void setXSampleCount(int xSampleCount) {
+        if (this.xSampleCount != xSampleCount) {
+            this.xSampleCount = xSampleCount;
+            changed();
+        }
+    }
+
+    public int getYSampleCount() {
+        return ySampleCount;
+    }
+
+    public void setYSampleCount(int ySampleCount) {
+        if (this.ySampleCount != ySampleCount) {
+            this.ySampleCount = ySampleCount;
+            changed();
+        }
+    }
+
     public void apply(AutoLevelSettings settings) {
         if (!this.equals(settings)) {
             autoLevelProbeZeroHeight = settings.getAutoLevelProbeZeroHeight();
@@ -238,7 +249,6 @@ public class AutoLevelSettings implements Serializable {
             autoLevelArcSliceLength = settings.getAutoLevelArcSliceLength();
             probeScanFeedRate = settings.getProbeScanFeedRate();
             probeSpeed = settings.getProbeSpeed();
-            stepResolution = settings.getStepResolution();
             minX = settings.getMinX();
             minY = settings.getMinY();
             minZ = settings.getMinZ();
@@ -248,6 +258,8 @@ public class AutoLevelSettings implements Serializable {
             zSurface = settings.getZSurface();
             zRetract = settings.getZRetract();
             applyToGcode = settings.getApplyToGcode();
+            xSampleCount = settings.getXSampleCount();
+            ySampleCount = settings.getYSampleCount();
             changed();
         }
     }

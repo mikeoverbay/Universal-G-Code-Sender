@@ -124,24 +124,27 @@ public class SurfaceScanner {
 
     public void reset() {
         isScanning.set(false);
-        double resolution = settings.getStepResolution();
+		int xAxisPoints = settings.getXSampleCount();
+		int yAxisPoints = settings.getYSampleCount();
+		this.probePositionGrid = new Position[xAxisPoints][yAxisPoints];
 
-        int xAxisPoints = (int) (Math.ceil((maxXYZ.getX() - minXYZ.getX()) / resolution)) + 1;
-        int yAxisPoints = (int) (Math.ceil((maxXYZ.getY() - minXYZ.getY()) / resolution)) + 1;
-        this.probePositionGrid = new Position[xAxisPoints][yAxisPoints];
+		// Calculate probe locations.
+		double xRange = maxXYZ.getX() - minXYZ.getX();
+		double yRange = maxXYZ.getY() - minXYZ.getY();
 
-        // Calculate probe locations.
-        for (int x = 0; x < xAxisPoints; x++) {
-            for (int y = 0; y < yAxisPoints; y++) {
-                Position p = new Position(
-                        minXYZ.getX() + Math.min(maxXYZ.getX() - minXYZ.getX(), x * resolution),
-                        minXYZ.getY() + Math.min(maxXYZ.getY() - minXYZ.getY(), y * resolution),
-                        Double.NaN,
-                        minXYZ.getUnits());
-                probePositionGrid[x][y] = p;
-            }
-        }
+		for (int x = 0; x < xAxisPoints; x++) {
+			for (int y = 0; y < yAxisPoints; y++) {
+				double xStep = xAxisPoints > 1 ? (xRange * x) / (xAxisPoints - 1) : 0;
+				double yStep = yAxisPoints > 1 ? (yRange * y) / (yAxisPoints - 1) : 0;
 
+				Position p = new Position(
+					minXYZ.getX() + xStep,
+					minXYZ.getY() + yStep,
+					Double.NaN,
+					minXYZ.getUnits());
+				probePositionGrid[x][y] = p;
+			}
+		}
         // Move along grid in zigzag pattern
         int yIncrement = 1;
         int yIndex = 0;

@@ -36,6 +36,7 @@ import java.util.Optional;
 import static com.willwinder.ugs.platform.surfacescanner.Utils.fileChooser;
 
 public class SaveScannedSurfaceAction extends AbstractAction {
+
     public static final String ICON_BASE = "com/willwinder/ugs/platform/surfacescanner/icons/save.svg";
 
     private final SurfaceScanner surfaceScanner;
@@ -80,17 +81,35 @@ public class SaveScannedSurfaceAction extends AbstractAction {
         }
 
         Position[][] grid = surfaceScanner.getProbePositionGrid();
+        if (grid.length == 0 || grid[0].length == 0) {
+            return;
+        }
+
+        Position min = grid[0][0];
+        Position max = grid[grid.length - 1][grid[0].length - 1];
+
+        int xSamples = grid.length;
+        int ySamples = grid[0].length;
 
         StringBuilder output = new StringBuilder();
-        for (Position[] row : grid) {
-            for (Position cell : row) {
-                output.append(cell.getX()).append(" ").append(cell.getY()).append(" ").append(cell.getZ()).append("\n");
+        output.append(String.format("# minX=%.5f maxX=%.5f\n", min.getX(), max.getX()));
+        output.append(String.format("# minY=%.5f maxY=%.5f\n", min.getY(), max.getY()));
+        output.append(String.format("# xSamples=%d ySamples=%d\n", xSamples, ySamples));
+        output.append(String.format("# units=%s\n", min.getUnits().toString()));
+
+        for (Position[] column : grid) {
+            for (Position p : column) {
+                output.append(p.getX()).append(" ")
+                        .append(p.getY()).append(" ")
+                        .append(p.getZ()).append("\n");
             }
         }
+
         try {
             IOUtils.write(output, Files.newOutputStream(selectedFile.get().toPath()), Charset.defaultCharset());
         } catch (IOException ex) {
             throw new RuntimeException(ex);
         }
     }
+
 }

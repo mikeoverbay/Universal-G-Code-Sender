@@ -52,7 +52,8 @@ public class AutoLevelerPanel extends JPanel {
     private final transient MeshLevelManager meshLevelManager;
     private final transient AutoLevelPreview autoLevelPreview;
     private final AutoLevelSettings autoLevelSettings = new AutoLevelSettings();
-    private Spinner stepResolution;
+    private Spinner xSamples;
+    private Spinner ySamples;
     private Spinner xMax;
     private Spinner xMin;
     private Spinner yMax;
@@ -83,7 +84,8 @@ public class AutoLevelerPanel extends JPanel {
         yMax = new Spinner(autoLevelSettings.getMaxY());
         zMax = new Spinner(autoLevelSettings.getMaxZ());
 
-        stepResolution = new Spinner(autoLevelSettings.getStepResolution());
+        xSamples = new Spinner(autoLevelSettings.getXSampleCount());
+        ySamples = new Spinner(autoLevelSettings.getYSampleCount());
         zSurface = new Spinner(autoLevelSettings.getZSurface());
         zRetract = new PercentSpinner(autoLevelSettings.getZRetract(), 0.001);
         zRetract.setToolTipText(Localization.getString("autoleveler.panel.z-retract.tooltip"));
@@ -93,7 +95,8 @@ public class AutoLevelerPanel extends JPanel {
         JLabel xLabel = new JLabel(Localization.getString("machineStatus.pin.x") + ':', SwingConstants.RIGHT);
         JLabel yLabel = new JLabel(Localization.getString("machineStatus.pin.y") + ':', SwingConstants.RIGHT);
         JLabel zLabel = new JLabel(Localization.getString("machineStatus.pin.z") + ':', SwingConstants.RIGHT);
-        JLabel resolutionLabel = new JLabel(Localization.getString("autoleveler.panel.resolution") + ':', SwingConstants.RIGHT);
+        JLabel xSamplesLabel = new JLabel("X Samples:", SwingConstants.RIGHT);
+        JLabel ySamplesLabel = new JLabel("Y Samples:", SwingConstants.RIGHT);
         JLabel zSurfaceLabel = new JLabel(Localization.getString("autoleveler.panel.z-surface") + ':', SwingConstants.RIGHT);
         JLabel zRetractLabel = new JLabel(Localization.getString("autoleveler.panel.z-retract") + ':', SwingConstants.RIGHT);
 
@@ -119,8 +122,10 @@ public class AutoLevelerPanel extends JPanel {
         JPanel jPanel2 = new JPanel();
         jPanel2.setLayout(new MigLayout("fill", "[shrink][80:80, sg1]"));
         jPanel2.add(new JLabel(" "), "growx, spanx, wrap");
-        jPanel2.add(resolutionLabel, "growx");
-        jPanel2.add(stepResolution, "growx, wrap");
+        jPanel2.add(xSamplesLabel, "growx");
+        jPanel2.add(xSamples, "growx, wrap");
+        jPanel2.add(ySamplesLabel, "growx");
+        jPanel2.add(ySamples, "growx, wrap");
         jPanel2.add(zSurfaceLabel, "growx");
         jPanel2.add(zSurface, "growx, wrap");
         jPanel2.add(zRetractLabel, "growx");
@@ -142,7 +147,8 @@ public class AutoLevelerPanel extends JPanel {
     }
 
     private void registerListeners() {
-        stepResolution.addChangeListener((ChangeEvent e) -> syncControlsToSettings());
+        xSamples.addChangeListener((ChangeEvent e) -> syncControlsToSettings());
+        ySamples.addChangeListener((ChangeEvent e) -> syncControlsToSettings());
         zRetract.addChangeListener((ChangeEvent e) -> syncControlsToSettings());
         xMin.addChangeListener((ChangeEvent e) -> syncControlsToSettings());
         xMax.addChangeListener((ChangeEvent e) -> syncControlsToSettings());
@@ -166,7 +172,8 @@ public class AutoLevelerPanel extends JPanel {
         zMin.setMaximum(zMax.getDoubleValue());
 
         autoLevelSettings.setZSurface(zSurface.getDoubleValue());
-        autoLevelSettings.setStepResolution(stepResolution.getDoubleValue());
+        autoLevelSettings.setXSampleCount((int) xSamples.getDoubleValue());
+        autoLevelSettings.setYSampleCount((int) ySamples.getDoubleValue());
         autoLevelSettings.setMinX(xMin.getDoubleValue());
         autoLevelSettings.setMinY(yMin.getDoubleValue());
         autoLevelSettings.setMinZ(zMin.getDoubleValue());
@@ -174,10 +181,6 @@ public class AutoLevelerPanel extends JPanel {
         autoLevelSettings.setMaxY(yMax.getDoubleValue());
         autoLevelSettings.setMaxZ(zMax.getDoubleValue());
         autoLevelSettings.setZRetract(zRetract.getDoubleValue());
-
-        // There is no point in having the step resolution bigger than the largest size
-        double stepResolutionMax = Math.max(Math.abs(xMin.getDoubleValue()) + xMax.getDoubleValue(), Math.abs(yMin.getDoubleValue()) + yMax.getDoubleValue());
-        stepResolution.setMaximum(stepResolutionMax);
     }
 
     public AutoLevelSettings getSettings() {
@@ -194,8 +197,12 @@ public class AutoLevelerPanel extends JPanel {
     }
 
     private void syncSettingsToControls(AutoLevelSettings autoLevelSettings) {
-        if (stepResolution.getDoubleValue() != autoLevelSettings.getStepResolution()) {
-            stepResolution.setValue(autoLevelSettings.getStepResolution());
+        if (xSamples.getDoubleValue() != autoLevelSettings.getXSampleCount()) {
+            xSamples.setValue(autoLevelSettings.getXSampleCount());
+        }
+
+        if (ySamples.getDoubleValue() != autoLevelSettings.getYSampleCount()) {
+            ySamples.setValue(autoLevelSettings.getYSampleCount());
         }
 
         if (zRetract.getDoubleValue() != autoLevelSettings.getZRetract()) {
@@ -233,7 +240,8 @@ public class AutoLevelerPanel extends JPanel {
 
     @Override
     public void setEnabled(boolean enabled) {
-        stepResolution.setEnabled(enabled);
+        xSamples.setEnabled(enabled);
+        ySamples.setEnabled(enabled);
         zRetract.setEnabled(enabled);
         xMin.setEnabled(enabled);
         xMax.setEnabled(enabled);
@@ -257,7 +265,8 @@ public class AutoLevelerPanel extends JPanel {
     public void setUnits(UnitUtils.Units units) {
         double stepSize = units == UnitUtils.Units.MM ? 0.1 : 0.01;
 
-        stepResolution.setStepSize(stepSize);
+        xSamples.setStepSize(1);
+        ySamples.setStepSize(1);
         xMin.setStepSize(stepSize);
         xMax.setStepSize(stepSize);
         yMin.setStepSize(stepSize);

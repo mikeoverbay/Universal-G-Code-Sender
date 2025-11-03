@@ -25,12 +25,15 @@ import com.willwinder.universalgcodesender.listeners.UGSEventListener;
 import com.willwinder.universalgcodesender.model.BackendAPI;
 import com.willwinder.universalgcodesender.model.UGSEvent;
 import com.willwinder.universalgcodesender.model.events.ControllerStatusEvent;
+
+import org.openide.DialogDisplayer;
+import org.openide.NotifyDescriptor;
 import org.openide.util.ImageUtilities;
 
 import javax.swing.*;
 import java.awt.event.ActionEvent;
-
 import static com.willwinder.ugs.platform.surfacescanner.Utils.shouldEraseProbedData;
+import com.willwinder.universalgcodesender.utils.AutoLevelSettings;
 
 public class ScanSurfaceAction extends AbstractAction implements UGSEventListener {
 
@@ -40,7 +43,9 @@ public class ScanSurfaceAction extends AbstractAction implements UGSEventListene
 
     public ScanSurfaceAction(SurfaceScanner surfaceScanner) {
         this.backend = CentralLookup.getDefault().lookup(BackendAPI.class);
-        this.backend.addUGSEventListener(this);
+        if (this.backend != null) {
+            this.backend.addUGSEventListener(this);
+        }
 
         this.surfaceScanner = surfaceScanner;
         String title = Localization.getString("autoleveler.panel.scan-surface");
@@ -59,10 +64,14 @@ public class ScanSurfaceAction extends AbstractAction implements UGSEventListene
 
     @Override
     public void actionPerformed(ActionEvent e) {
-        // Exit early if we have probed data and it is not ok to erase
         if (surfaceScanner.isValid() && !shouldEraseProbedData()) {
             return;
         }
+
+        if (!validateZBeforeScan()) {
+            return;
+        }
+
         surfaceScanner.reset();
         surfaceScanner.scan();
     }
@@ -72,5 +81,57 @@ public class ScanSurfaceAction extends AbstractAction implements UGSEventListene
         if (evt instanceof ControllerStatusEvent) {
             setEnabled(isEnabled());
         }
+    }
+
+    private boolean validateZBeforeScan() {
+        double zMin, zMax, clearance;
+        try {
+            AutoLevelSettings settings = backend.getSettings().getAutoLevelSettings();
+            zMin = settings.getMinZ();
+            zMax = settings.getMaxZ();
+
+        } catch (Exception ex) {
+            DialogDisplayer.getDefault().notify(new NotifyDescriptor.Message(
+                    "Could not read Auto-Level Z settings.", NotifyDescriptor.WARNING_MESSAGE));
+            return false;
+        }
+
+        if (zMin >= zMax) {
+            DialogDisplayer.getDefault().notify(new NotifyDescriptor.Message(
+                    "Z range is invalid (Z Min ≥ Z Max).", NotifyDescriptor.WARNING_MESSAGE));
+            return false;
+        }
+
+        double z;
+        try {
+            z = backend.getWorkPosition().z;
+        } catch (Exception ex) {
+            DialogDisplayer.getDefault().notify(new NotifyDescriptor.Message(
+                    "Could not read current Z position. Aborting scan.",
+                    NotifyDescriptor.ERROR_MESSAGE));
+            return false;
+        }
+
+        if (z < zMin) {
+            DialogDisplayer.getDefault().notify(new NotifyDescriptor.Message(
+                    String.format("Current Z (%.3f) is below Z-Min (%.3f). This may crash the probe. Aborting scan.", z, zMin),
+                    NotifyDescriptor.ERROR_MESSAGE));
+            return false;
+        }
+
+        if (z > zMax ) {
+            DialogDisplayer.getDefault().notify(new NotifyDescriptor.Message(
+                    String.format("Current Z (%.3f) is above Z-Max + Clearance (%.3f + %.3f). Aborting scan.", z, zMax, 0.0),
+                    NotifyDescriptor.WARNING_MESSAGE));
+            return false;
+        }
+
+        if ((zMax - zMin) < 0.050) {
+            DialogDisplayer.getDefault().notify(new NotifyDescriptor.Message(
+                    String.format("Z scan range is very small (%.3f in). Aborting scan.", (zMax - zMin)),
+                    NotifyDescriptor.WARNING_MESSAGE));
+            return false;
+        }
+        return true;
     }
 }
