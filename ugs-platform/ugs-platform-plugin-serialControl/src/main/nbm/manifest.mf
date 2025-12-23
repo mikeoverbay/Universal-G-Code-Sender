@@ -1,3 +1,5 @@
 Manifest-Version: 1.0
 OpenIDE-Module-Localizing-Bundle: com/willwinder/serialcontrol/Bundle.properties
-
+OpenIDE-Module: com.willwinder.serialcontrol
+OpenIDE-Module-Specification-Version: 1.0
+OpenIDE-Module-Public-Packages: com.willwinder.serialcontrol.*

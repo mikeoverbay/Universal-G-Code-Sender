@@ -35,6 +35,15 @@ import com.willwinder.universalgcodesender.uielements.components.PercentSpinner;
 import com.willwinder.universalgcodesender.uielements.components.Spinner;
 import com.willwinder.universalgcodesender.utils.AutoLevelSettings;
 import net.miginfocom.swing.MigLayout;
+import javax.swing.JOptionPane;
+
+import org.openide.windows.IOProvider;
+import org.openide.windows.InputOutput;
+
+import com.willwinder.serialcontrol.serialControl;
+
+
+import java.io.OutputStream;
 
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
@@ -48,6 +57,9 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public class AutoLevelerPanel extends JPanel {
     public final Set<AutoLevelPanelListener> listeners = ConcurrentHashMap.newKeySet();
+	private final InputOutput io = IOProvider.getDefault().getIO("AutoLeveler", true);
+	private boolean probeHomed = false;
+
     private final transient SurfaceScanner surfaceScanner;
     private final transient MeshLevelManager meshLevelManager;
     private final transient AutoLevelPreview autoLevelPreview;
@@ -60,7 +72,7 @@ public class AutoLevelerPanel extends JPanel {
     private Spinner yMin;
     private Spinner zMax;
     private Spinner zMin;
-    private PercentSpinner zRetract;
+    public Spinner zRetract;
     private Spinner zSurface;
 
     public AutoLevelerPanel(SurfaceScanner surfaceScanner, MeshLevelManager meshLevelManager, AutoLevelPreview autoLevelPreview, AutoLevelSettings autoLevelSettings, UnitUtils.Units units) {
@@ -87,7 +99,12 @@ public class AutoLevelerPanel extends JPanel {
         xSamples = new Spinner(autoLevelSettings.getXSampleCount());
         ySamples = new Spinner(autoLevelSettings.getYSampleCount());
         zSurface = new Spinner(autoLevelSettings.getZSurface());
-        zRetract = new PercentSpinner(autoLevelSettings.getZRetract(), 0.001);
+        double zr = autoLevelSettings.getZRetract();
+		if (zr <= 0) {
+			zr = 1.000; // default
+			autoLevelSettings.setZRetract(zr);
+		}
+		zRetract = new Spinner(zr);
         zRetract.setToolTipText(Localization.getString("autoleveler.panel.z-retract.tooltip"));
 
         JLabel minLabel = new JLabel(Localization.getString("autoleveler.panel.min"), SwingConstants.LEFT);
@@ -114,9 +131,11 @@ public class AutoLevelerPanel extends JPanel {
         jPanel1.add(yMin, "growx");
         jPanel1.add(yMax, "growx, wrap");
 
-        jPanel1.add(zLabel, "growx");
+ /*     
+		jPanel1.add(zLabel, "growx");
         jPanel1.add(zMin, "growx");
         jPanel1.add(zMax, "growx, wrap");
+*/
         jPanel1.add(new JButton(new UpdateMinMaxFromGcode(surfaceScanner)), "skip, spanx 2, growx");
 
         JPanel jPanel2 = new JPanel();
@@ -130,10 +149,15 @@ public class AutoLevelerPanel extends JPanel {
         jPanel2.add(zSurface, "growx, wrap");
         jPanel2.add(zRetractLabel, "growx");
         jPanel2.add(zRetract, "growx, wrap");
+ 
+		JPanel jPanel3 = new JPanel(new MigLayout("fill"));
 
-        JPanel jPanel3 = new JPanel(new MigLayout("fill"));
-        jPanel3.add(new JLabel(" "), "growx, spanx, wrap");
-        jPanel3.add(new JButton(new ScanSurfaceAction(surfaceScanner)), "growx, wrap");
+		JButton connectProbeButton = new JButton("Home Probe");
+		connectProbeButton.addActionListener(this::connectProbeButtonActionPerformed);
+
+		jPanel3.add(connectProbeButton, "growx, wrap");
+		jPanel3.add(new JButton(new ScanSurfaceAction(surfaceScanner)), "growx, wrap");
+
         jPanel3.add(new JLabel(" "), "growx, spanx, wrap");
         jPanel3.add(new JCheckBox(new TogglePreviewAction(autoLevelPreview)), "growx, wrap");
         jPanel3.add(new JCheckBox(new ToggleApplyToGcodeAction(meshLevelManager)), "growx, wrap");
@@ -237,6 +261,55 @@ public class AutoLevelerPanel extends JPanel {
             zMax.getModel().setValue(autoLevelSettings.getMaxZ());
         }
     }
+
+private void connectProbeButtonActionPerformed(java.awt.event.ActionEvent evt) {
+    String response = serialControl.sendAndReceiveProbe("H\n", 5000);
+
+    if (response == null) {
+        surfaceScanner.setProbeReady(false);
+        JOptionPane.showMessageDialog(
+            this,
+            "No response from Auto Probe. Is it connected?",
+            "Auto Probe",
+            JOptionPane.ERROR_MESSAGE
+        );
+        return;
+    }
+
+    switch (response.trim()) {
+        case "homed":
+            surfaceScanner.setProbeReady(true);
+            JOptionPane.showMessageDialog(
+                this,
+                "Auto Probe homed successfully.",
+                "Auto Probe",
+                JOptionPane.INFORMATION_MESSAGE
+            );
+            break;
+
+        case "ERROR":
+        case "E":
+            surfaceScanner.setProbeReady(false);
+            JOptionPane.showMessageDialog(
+                this,
+                "Probe error during homing. Check for overtravel.",
+                "Auto Probe",
+                JOptionPane.ERROR_MESSAGE
+            );
+            break;
+
+        default:
+            surfaceScanner.setProbeReady(false);
+            JOptionPane.showMessageDialog(
+                this,
+                "Unexpected probe response: " + response,
+                "Auto Probe",
+                JOptionPane.ERROR_MESSAGE
+            );
+            break;
+    }
+}
+
 
     @Override
     public void setEnabled(boolean enabled) {

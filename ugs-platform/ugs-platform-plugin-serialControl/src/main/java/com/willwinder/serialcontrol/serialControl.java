@@ -1,16 +1,14 @@
 // CNC Controller Plugin
 package com.willwinder.serialcontrol;
 
-import com.fazecast.jSerialComm.SerialPort;
+
 import com.willwinder.universalgcodesender.model.Axis;
 import com.willwinder.universalgcodesender.model.BackendAPI;
 import com.willwinder.universalgcodesender.model.BackendAPIReadOnly;
 import com.willwinder.universalgcodesender.model.Position;
 import com.willwinder.universalgcodesender.services.JogService;
 import com.willwinder.ugs.nbp.lib.lookup.CentralLookup;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.nio.ByteBuffer;
+
 import org.openide.modules.OnStart;
 import org.openide.util.lookup.ServiceProvider;
 import org.openide.windows.IOProvider;
@@ -22,10 +20,20 @@ import com.willwinder.universalgcodesender.model.UnitUtils.Units;
 import com.willwinder.universalgcodesender.listeners.ControllerStatus;
 
 
+import com.fazecast.jSerialComm.SerialPort;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+
+
 
 @OnStart
 @ServiceProvider(service = Runnable.class)
 public class serialControl implements Runnable {
+
+    public static SerialPort pendantPort;
+    public static SerialPort probePort;
 
     private static final int BAUD_RATE = 9600;
     private static final long CONNECTION_TIMEOUT_MS = 10000;
@@ -44,8 +52,8 @@ public class serialControl implements Runnable {
     private volatile int liveSpindleSpeed = 0;
 
     /* -------------------------------------------------- */
-    /*  Helper                                             */
-    /* -------------------------------------------------- */
+ /*  Helper                                             */
+ /* -------------------------------------------------- */
     private static void initIO() {
         if (io == null) {
             io = IOProvider.getDefault().getIO("serialcontrol", false);
@@ -55,7 +63,7 @@ public class serialControl implements Runnable {
 
     @Override
     public void run() {
-         // Ensure IO is ready **before** starting serial thread
+        // Ensure IO is ready **before** starting serial thread
         initIO();
         new Thread(this::startSerialConnection, "SerialControl-ConnectionThread").start();
         io = IOProvider.getDefault().getIO("serialcontrol", false);
@@ -85,49 +93,89 @@ public class serialControl implements Runnable {
         }
     }
 
-    private void startSerialConnection() {
+private void startSerialConnection() {
 
-        try {
+    try {
+        // --- Scan for the PROBE (Arduino Uno) ---
+        for (SerialPort port : SerialPort.getCommPorts()) {
+            String desc = port.getDescriptivePortName();
+            if (desc != null && desc.contains("Arduino Leonardo")) {
+                io.getOut().println("[Probe] Found: " + desc);
+                port.setBaudRate(115200);
 
-            SerialPort selected = null;
-            for (SerialPort port : SerialPort.getCommPorts()) {
-                io.getOut().println("[Scan] Trying port: " + port.getSystemPortName());
-                port.setBaudRate(BAUD_RATE);
-                port.setComPortTimeouts(SerialPort.TIMEOUT_NONBLOCKING, 0, 0);
-                if (!port.openPort()) {
-                    io.getOut().println("[Scan] Failed to open: " + port.getSystemPortName());
-                    continue;
+                if (port.openPort()) {
+                    probePort = port;
+					// RIGHT AFTER probePort.openPort() succeeds:
+				try {
+					byte[] buf = new byte[2048];
+					while (probePort.bytesAvailable() > 0) {
+						int n = probePort.readBytes(buf, Math.min(buf.length, probePort.bytesAvailable()));
+						if (n <= 0) break;
+						System.out.write(buf, 0, n);   // dump whatever was already in the buffer
+					}
+					System.out.flush();
+				} catch (Exception ignore) {}
+
+                    io.getOut().println("[Probe] Port opened: " + port.getSystemPortName());
+                } else {
+                    io.getOut().println("[Probe] Failed to open: " + port.getSystemPortName());
                 }
 
-                try (java.util.Scanner tempScanner = new java.util.Scanner(port.getInputStream())) {
-                    Thread.sleep(2000);
-                    boolean found = false;
-                    while (tempScanner.hasNextLine()) {
-                        String line = tempScanner.nextLine().trim();
-                        io.getOut().println("[Scan] Read: " + line);
-                        if ("CONREQ".equals(line)) {
-                            serialOut = port.getOutputStream();
-                            serialOut.write("CONACK\n".getBytes());
-                            serialOut.flush();
-                            Thread.sleep(100); // allow stream and Nano time to process
-                            selected = port;
-                            io.getOut().println("[Handshake] CONACK sent on " + port.getSystemPortName());
-                            found = true;
-                            break;
-                        }
-                    }
-                    if (!found) {
-                        port.closePort();
-                    } else {
+                break; // only need one match
+            }
+        }
+
+        // --- Scan for the PENDANT (look for "CONREQ") ---
+        SerialPort selected = null;
+        for (SerialPort port : SerialPort.getCommPorts()) {
+            // skip probe port so we don't touch it again
+            if (port == probePort) {
+                io.getOut().println("[Scan] Skipping probe port: " + port.getSystemPortName());
+                continue;
+            }
+
+            io.getOut().println("[Scan] Trying port: " + port.getSystemPortName());
+            port.setBaudRate(BAUD_RATE);
+            port.setComPortTimeouts(SerialPort.TIMEOUT_NONBLOCKING, 0, 0);
+
+            if (!port.openPort()) {
+                io.getOut().println("[Scan] Failed to open: " + port.getSystemPortName());
+                continue;
+            }
+
+            boolean found = false;
+            try (java.util.Scanner tempScanner = new java.util.Scanner(port.getInputStream())) {
+                Thread.sleep(2000); // give time for boot messages
+
+                while (tempScanner.hasNextLine()) {
+                    String line = tempScanner.nextLine().trim();
+                    io.getOut().println("[Scan] Read: " + line);
+
+                    if ("CONREQ".equals(line)) {
+                        serialOut = port.getOutputStream();
+                        serialOut.write("CONACK\n".getBytes());
+                        serialOut.flush();
+                        Thread.sleep(100); // time for Nano to respond
+
+                        selected = port;
+                        io.getOut().println("[Handshake] CONACK sent on " + port.getSystemPortName());
+                        found = true;
                         break;
                     }
                 }
             }
 
-            if (selected == null) {
-                io.getErr().println("[Error] No compatible port found.");
-                return;
+            if (!found) {
+                port.closePort();
+            } else {
+                break;
             }
+        }
+
+        if (selected == null) {
+            io.getErr().println("[Error] No pendant found.");
+            return;
+        }
 
             activePort = selected;
             serialOut = activePort.getOutputStream();
@@ -182,6 +230,51 @@ public class serialControl implements Runnable {
             connected = false;
         }
     }
+
+public static String sendAndReceiveProbe(String command, int timeoutMillis) {
+    if (probePort == null || !probePort.isOpen()) {
+        io.getErr().println("[Probe] Port not connected.");
+        return null;
+    }
+
+    try {
+        OutputStream out = probePort.getOutputStream();
+        InputStream in = probePort.getInputStream();
+
+        // Clear buffer before sending
+        while (in.available() > 0) in.read();
+
+        out.write(command.getBytes());
+        out.flush();
+		Thread.sleep(500); // Wait 0.5 seconds before reading
+
+        long start = System.currentTimeMillis();
+        StringBuilder line = new StringBuilder();
+
+        while (System.currentTimeMillis() - start < 9000) {
+            while (in.available() > 0) {
+                int b = in.read();
+                if (b == -1) break;
+                char c = (char) b;
+                if (c == '\r') continue;
+                if (c == '\n') {
+                    String response = line.toString().trim();
+                    io.getOut().println("[Probe] Received: " + response);
+                    return response;
+                }
+                line.append(c);
+            }
+            Thread.sleep(5);
+        }
+
+        io.getErr().println("[Probe] Timeout waiting for response.");
+    } catch (Exception ex) {
+        io.getErr().println("[Probe] Comm error: " + ex.getMessage());
+    }
+
+    return null;
+}
+
 
     private void writeFloatToBuffer(ByteBuffer buf, float value) {
         if (Float.isNaN(value)) {

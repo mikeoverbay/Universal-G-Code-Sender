@@ -34,12 +34,18 @@ import javax.swing.*;
 import java.awt.event.ActionEvent;
 import static com.willwinder.ugs.platform.surfacescanner.Utils.shouldEraseProbedData;
 import com.willwinder.universalgcodesender.utils.AutoLevelSettings;
+import org.openide.util.RequestProcessor;
+import javax.swing.SwingUtilities;
+import org.openide.DialogDisplayer;
+import org.openide.NotifyDescriptor;
 
 public class ScanSurfaceAction extends AbstractAction implements UGSEventListener {
 
     public static final String ICON_BASE = "com/willwinder/ugs/platform/surfacescanner/icons/scan.svg";
     private final SurfaceScanner surfaceScanner;
     private final BackendAPI backend;
+	
+	private static final RequestProcessor RP = new RequestProcessor(ScanSurfaceAction.class);
 
     public ScanSurfaceAction(SurfaceScanner surfaceScanner) {
         this.backend = CentralLookup.getDefault().lookup(BackendAPI.class);
@@ -62,19 +68,32 @@ public class ScanSurfaceAction extends AbstractAction implements UGSEventListene
         return backend != null && backend.isConnected() && backend.isIdle();
     }
 
-    @Override
-    public void actionPerformed(ActionEvent e) {
-        if (surfaceScanner.isValid() && !shouldEraseProbedData()) {
-            return;
-        }
 
-        if (!validateZBeforeScan()) {
-            return;
-        }
 
-        surfaceScanner.reset();
-        surfaceScanner.scan();
+@Override
+public void actionPerformed(ActionEvent e) {
+    if (surfaceScanner.isValid() && !shouldEraseProbedData()) {
+        return;
     }
+    if (!validateZBeforeScan()) {
+        return;
+    }
+
+    surfaceScanner.reset();
+
+    RP.post(() -> {
+        try {
+            surfaceScanner.scan();
+        } catch (Exception ex) {
+            SwingUtilities.invokeLater(() ->
+                DialogDisplayer.getDefault().notify(new NotifyDescriptor.Message(
+                    "Scan failed: " + ex.getMessage(),
+                    NotifyDescriptor.ERROR_MESSAGE
+                ))
+            );
+        }
+    });
+}
 
     @Override
     public void UGSEvent(UGSEvent evt) {
@@ -112,7 +131,7 @@ public class ScanSurfaceAction extends AbstractAction implements UGSEventListene
             return false;
         }
 
-        if (z < zMin) {
+/*         if (z < zMin) {
             DialogDisplayer.getDefault().notify(new NotifyDescriptor.Message(
                     String.format("Current Z (%.3f) is below Z-Min (%.3f). This may crash the probe. Aborting scan.", z, zMin),
                     NotifyDescriptor.ERROR_MESSAGE));
@@ -131,7 +150,7 @@ public class ScanSurfaceAction extends AbstractAction implements UGSEventListene
                     String.format("Z scan range is very small (%.3f in). Aborting scan.", (zMax - zMin)),
                     NotifyDescriptor.WARNING_MESSAGE));
             return false;
-        }
+        } */
         return true;
     }
 }

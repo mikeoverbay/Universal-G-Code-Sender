@@ -28,6 +28,8 @@ import com.willwinder.universalgcodesender.model.UnitUtils.Units;
 import com.willwinder.universalgcodesender.model.events.ProbeEvent;
 import com.willwinder.universalgcodesender.utils.AutoLevelSettings;
 
+import com.willwinder.serialcontrol.serialControl;
+
 import java.util.Deque;
 import java.util.LinkedList;
 import java.util.Optional;
@@ -42,8 +44,9 @@ import java.util.logging.Logger;
  * @author wwinder
  */
 public class SurfaceScanner {
-    private static final Logger logger = Logger.getLogger(SurfaceScanner.class.getSimpleName());
 
+    private static final Logger logger = Logger.getLogger(SurfaceScanner.class.getSimpleName());
+    private boolean probeReady = false;
     private final BackendAPI backend;
     private final AutoLevelSettings settings;
     private final Set<SurfaceScannerListener> listeners = ConcurrentHashMap.newKeySet();
@@ -52,6 +55,7 @@ public class SurfaceScanner {
     private Position minXYZ = Position.ZERO;
     private Position maxXYZ = Position.ZERO;
     private Position machineWorkOffset = new Position(Units.MM);
+	private Position first = null;
 
     private final AtomicBoolean isScanning = new AtomicBoolean(false);
 
@@ -63,8 +67,17 @@ public class SurfaceScanner {
         update(minPosition, maxPosition);
     }
 
+    public boolean isProbeReady() {
+        return probeReady;
+    }
+
+    public void setProbeReady(boolean ready) {
+        this.probeReady = ready;
+    }
+
     /**
-     * Provides two points of the scanners bounding box and the number of points to sample in the X/Y directions.
+     * Provides two points of the scanners bounding box and the number of points to sample in the X/Y
+     * directions.
      */
     public void update(final Position corner1, final Position corner2) {
         if (corner1.getUnits() != corner2.getUnits()) {
@@ -91,7 +104,9 @@ public class SurfaceScanner {
     }
 
     public void handleEvent(ProbeEvent evt) {
-        if (pendingPositions.isEmpty() || !isScanning.get()) return;
+        if (pendingPositions.isEmpty() || !isScanning.get()) {
+            return;
+        }
 
         Position probeMachinePosition = evt.getProbePosition();
         if (!Double.isFinite(probeMachinePosition.getZ())) {
@@ -113,10 +128,10 @@ public class SurfaceScanner {
             // The probing is done!
             moveToSafeStartPoint(probePosition);
         } else {
-            double retractedZ = retract(probePosition.getZ());
-            probeNextPoint(retractedZ);
+            //double retractedZ = retract(probePosition.getZ());
+            probeNextPoint(null);
         }
-}
+    }
 
     private Units getPreferredUnits() {
         return this.backend.getSettings().getPreferredUnits();
@@ -124,27 +139,27 @@ public class SurfaceScanner {
 
     public void reset() {
         isScanning.set(false);
-		int xAxisPoints = settings.getXSampleCount();
-		int yAxisPoints = settings.getYSampleCount();
-		this.probePositionGrid = new Position[xAxisPoints][yAxisPoints];
+        int xAxisPoints = settings.getXSampleCount();
+        int yAxisPoints = settings.getYSampleCount();
+        this.probePositionGrid = new Position[xAxisPoints][yAxisPoints];
 
-		// Calculate probe locations.
-		double xRange = maxXYZ.getX() - minXYZ.getX();
-		double yRange = maxXYZ.getY() - minXYZ.getY();
+        // Calculate probe locations.
+        double xRange = maxXYZ.getX() - minXYZ.getX();
+        double yRange = maxXYZ.getY() - minXYZ.getY();
 
-		for (int x = 0; x < xAxisPoints; x++) {
-			for (int y = 0; y < yAxisPoints; y++) {
-				double xStep = xAxisPoints > 1 ? (xRange * x) / (xAxisPoints - 1) : 0;
-				double yStep = yAxisPoints > 1 ? (yRange * y) / (yAxisPoints - 1) : 0;
+        for (int x = 0; x < xAxisPoints; x++) {
+            for (int y = 0; y < yAxisPoints; y++) {
+                double xStep = xAxisPoints > 1 ? (xRange * x) / (xAxisPoints - 1) : 0;
+                double yStep = yAxisPoints > 1 ? (yRange * y) / (yAxisPoints - 1) : 0;
 
-				Position p = new Position(
-					minXYZ.getX() + xStep,
-					minXYZ.getY() + yStep,
-					Double.NaN,
-					minXYZ.getUnits());
-				probePositionGrid[x][y] = p;
-			}
-		}
+                Position p = new Position(
+                        minXYZ.getX() + xStep,
+                        minXYZ.getY() + yStep,
+                        Double.NaN,
+                        minXYZ.getUnits());
+                probePositionGrid[x][y] = p;
+            }
+        }
         // Move along grid in zigzag pattern
         int yIncrement = 1;
         int yIndex = 0;
@@ -174,7 +189,8 @@ public class SurfaceScanner {
     }
 
     /**
-     * Begin a scan the surface {@link #handleEvent(ProbeEvent)} must be called to properly progress through the scan.
+     * Begin a scan the surface {@link #handleEvent(ProbeEvent)} must be called to properly progress through
+     * the scan.
      */
     public void scan() {
         isScanning.set(true);
@@ -190,74 +206,238 @@ public class SurfaceScanner {
     }
 
     private void moveToSafeStartPoint(Position currentPosition) {
-        try {
-            // Move up if below probe area
-            double safetyHeight = (UnitUtils.scaleUnits(Units.MM, maxXYZ.getUnits()) * backend.getSettings().getSafetyHeight()) + maxXYZ.getZ();
-            if (currentPosition.getPositionIn(maxXYZ.getUnits()).getZ() < safetyHeight) {
-                PartialPosition safeHeightPos = PartialPosition.builder(maxXYZ.getUnits()).setZ(safetyHeight).build();
-                String cmd = GcodeUtils.generateMoveCommand(
-                        "G90G0", getProbeScanFeedRate(), safeHeightPos);
-                logger.log(Level.INFO, "Move up to safe height {0}", new Object[]{safeHeightPos});
-                backend.sendGcodeCommand(true, cmd);
-            }
+    try {
+        // Move to the first XY point
+        first = minXYZ.getPositionIn(getPreferredUnits());
+        moveXYAndWait(first, 15000);
 
-            // Move to the XY start position
-            PartialPosition startPos = PartialPosition.builder(minXYZ)
-                    .clearZ()
-                    .clearABC()
-                    .build();
+        setProbeReady(true);
 
-            String cmd = GcodeUtils.generateMoveCommand(
-                    "G90G0", getProbeScanFeedRate(), startPos);
-            logger.log(Level.INFO, "Move to start position {0}", new Object[]{startPos});
-            backend.sendGcodeCommand(true, cmd);
-
-            // Move to the Z start position
-            PartialPosition startHeight = PartialPosition.builder(maxXYZ.getUnits()).setZ(maxXYZ.getZ()).build();
-            cmd = GcodeUtils.generateMoveCommand(
-                    "G90G0", getProbeScanFeedRate(), startHeight);
-            logger.log(Level.INFO, "Move to start height {0}", new Object[]{startHeight});
-            backend.sendGcodeCommand(true, cmd);
-        } catch (Exception e) {
-            reset();
-            throw new RuntimeException(e);
-        }
+    } catch (Exception e) {
+        setProbeReady(false);
+        reset();
+        throw new RuntimeException(e);
     }
+}
+
 
     public Optional<Position> getNextProbePoint() {
         return Optional.ofNullable(this.pendingPositions.peek());
     }
 
-    private void probeNextPoint(Double zBackoff) {
-        try {
-            Position p = this.pendingPositions.peek();
+    private void waitForControllerIdle(long timeoutMs) throws InterruptedException {
+        long start = System.currentTimeMillis();
+        boolean sawNotIdle = false;
 
-            // Position over next probe position
-            PartialPosition startPos = PartialPosition.builder(p)
-                    .clearZ()
-                    .clearABC()
-                    .build();
+        while (System.currentTimeMillis() - start < timeoutMs) {
+            boolean idle = backend.isIdle();
 
-            String cmd = GcodeUtils.generateMoveCommand(
-                    "G90G0", getProbeScanFeedRate(), startPos);
-            logger.log(Level.INFO, "MoveTo {0} {1}", new Object[]{startPos, cmd});
-            backend.sendGcodeCommand(true, cmd);
+            if (!idle) {
+                sawNotIdle = true; // we observed motion / busy state
+            } else if (sawNotIdle) {
+                return; // busy -> idle transition observed
+            }
 
-            // Send probe command, probing down to zMin
-            double probeDistance = minXYZ.getZ() - zBackoff;
-            logger.log(Level.INFO, "Probe {0}", probeDistance);
-            backend.probe("Z", getProbeSpeed(), probeDistance, getPreferredUnits());
-        } catch (Exception e) {
-            reset();
-            throw new RuntimeException(e);
+            Thread.sleep(25);
+        }
+
+        // If we never saw not-idle, the move may have completed extremely fast.
+        // If we saw not-idle but didn't return idle, it's a real timeout.
+        if (sawNotIdle) {
+            throw new RuntimeException("Timeout waiting for controller to become idle.");
         }
     }
+	
+private void moveXYAndWait(Position target, long timeoutMs) throws Exception {
+    // Use preferred units for all comparisons
+    UnitUtils.Units preferred = backend.getSettings().getPreferredUnits();
 
-    private double getProbeSpeed() {
-        return settings.getProbeSpeed() * UnitUtils.scaleUnits(Units.MM, getPreferredUnits());
+    // Ensure target is in the same units we will compare against
+    Position t = target.getPositionIn(preferred);
+
+    // Build XY-only move in the same units (G90 absolute, G0 rapid)
+    PartialPosition startPos = PartialPosition.builder(t)
+            .clearZ()
+            .clearABC()
+            .build();
+
+    String cmd = GcodeUtils.generateMoveCommand("G90G0", getProbeScanFeedRate(), startPos);
+    logger.log(Level.INFO, "MoveTo {0} {1}", new Object[]{startPos, cmd});
+    backend.sendGcodeCommand(true, cmd);
+
+    // Wait for controller to be idle AND at the requested XY (in preferred units)
+    long start = System.currentTimeMillis();
+
+    // Tolerance in preferred units
+    double tol = (preferred == UnitUtils.Units.MM) ? 0.05 : 0.002;
+
+    while (System.currentTimeMillis() - start < timeoutMs) {
+        // Convert current work position to preferred units
+        Position w = backend.getWorkPosition().getPositionIn(preferred);
+
+        boolean atXY =
+                Math.abs(w.getX() - t.getX()) <= tol &&
+                Math.abs(w.getY() - t.getY()) <= tol;
+
+        if (backend.isIdle() && atXY) {
+            return;
+        }
+
+        Thread.sleep(25);
     }
 
-    private double getProbeScanFeedRate() {
+    throw new RuntimeException("Timeout waiting for XY move to complete.");
+}
+
+    private void probeNextPoint(Double zBackoff) {
+    try {
+        if (!isProbeReady()) {
+            throw new RuntimeException("Probe not ready.");
+        }
+
+        Position target = pendingPositions.peek();
+        if (target == null) return;
+
+        // Move to the XY point and wait until motion completes
+        moveXYAndWait(target, 15000);
+
+		double zr = settings.getZRetract();
+		sendZRetractToProbe(zr);
+
+
+        // Now read probe measurement
+        String resp = serialControl.sendAndReceiveProbe("P\n", 9000);
+        if (resp == null) {
+            setProbeReady(false);
+            throw new RuntimeException("No response from probe to P.");
+        }
+
+        resp = resp.trim();
+
+		if ("E".equalsIgnoreCase(resp) || "ERROR".equalsIgnoreCase(resp)) {
+			setProbeReady(false);
+			reset();
+
+			// Send to output (fallback)
+			System.out.println("[Probe] Over Travel Error");
+
+			// Popup (NetBeans platform)
+			try {
+				org.openide.DialogDisplayer.getDefault().notify(
+					new org.openide.NotifyDescriptor.Message(
+						"Over Travel Error",
+						org.openide.NotifyDescriptor.ERROR_MESSAGE
+					)
+				);
+			} catch (Throwable ignore) {}
+
+			return;
+		}
+
+
+        double z;
+        try {
+            z = Double.parseDouble(resp);
+        } catch (NumberFormatException ex) {
+            setProbeReady(false);
+            throw new RuntimeException("Invalid probe numeric response: " + resp, ex);
+        }
+
+        if (!Double.isFinite(z)) {
+            setProbeReady(false);
+            throw new RuntimeException("Non-finite probe value: " + resp);
+        }
+
+        // Record result at this XY
+        Position measured = new Position(target.getX(), target.getY(), z, getPreferredUnits());
+        probeEvent(measured); // should pop pendingPositions
+
+		if (!pendingPositions.isEmpty()) {
+			probeNextPoint(null);
+		} else {
+			// Done probing all points: retract probe out of the way
+			resp = serialControl.sendAndReceiveProbe("H\n", 9000);
+
+			if (resp == null) {
+				setProbeReady(false);
+				throw new RuntimeException("No response from probe on final retract (H).");
+			}
+
+			resp = resp.trim();
+
+			if ("E".equalsIgnoreCase(resp) || "ERROR".equalsIgnoreCase(resp)) {
+				setProbeReady(false);
+				throw new RuntimeException("Probe error on final retract (H): " + resp);
+			}
+
+			// If your probe replies "homed" on success, keep this check.
+			// If it replies something else, change this accordingly.
+			if (!"homed".equalsIgnoreCase(resp)) {
+				throw new RuntimeException("Unexpected probe response on final retract (H): " + resp);
+			}
+
+			// Optional: return machine to first probe XY location (if you stored it)
+			if (first != null) {
+				moveXYAndWait(first, 15000);
+			}
+		}
+
+
+    } catch (Exception e) {
+        setProbeReady(false);
+        reset();
+        throw new RuntimeException(e);
+    }
+}
+
+private boolean sendZRetractToProbe(double zr) {
+    String cmd = String.format(java.util.Locale.US, "ZR:%.3f\n", zr);
+
+	String resp;
+	try {
+		resp = serialControl.sendAndReceiveProbe(cmd,9000);   // assumes it returns a line String (or null/empty on timeout)
+	} catch (Exception ex) {
+		showProbePopupAndOutput("Over Travel Error"); // or "Failed to send Z retract"
+		return false;
+	}
+
+	if (resp == null) {
+		showProbePopupAndOutput("Over Travel Error"); // or "No response from probe"
+		return false;
+	}
+
+	resp = resp.trim();
+	if (resp.equalsIgnoreCase("E") || resp.equalsIgnoreCase("ERROR") || resp.toUpperCase().startsWith("ERR")) {
+		showProbePopupAndOutput("Over Travel Error");
+		return false;
+	}
+
+	// Accept common ACKs: "OK", "OK ZR=0.750", etc.
+	if (!resp.toUpperCase().startsWith("OK")) {
+		showProbePopupAndOutput("Over Travel Error"); // or "Unexpected probe response: " + resp
+		return false;
+	}
+
+	return true;
+}
+
+// Put this in the same class (SurfaceScanner / AutoLevelerPanel) where you're doing the check.
+private void showProbePopupAndOutput(String msg) {
+    // Output window fallback (no extra dependencies)
+    System.out.println("[Probe] " + msg);
+
+    // Popup (NetBeans Platform)
+    try {
+        org.openide.DialogDisplayer.getDefault().notify(
+            new org.openide.NotifyDescriptor.Message(
+                msg,
+                org.openide.NotifyDescriptor.ERROR_MESSAGE
+            )
+        );
+    } catch (Throwable ignore) {}
+}
+
+	private double getProbeScanFeedRate() {
         return settings.getProbeScanFeedRate() * UnitUtils.scaleUnits(Units.MM, getPreferredUnits());
     }
 

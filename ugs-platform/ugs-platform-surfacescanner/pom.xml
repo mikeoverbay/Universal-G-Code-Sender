@@ -20,6 +20,9 @@
             <extensions>true</extensions>
             <configuration>
                 <moduleDependencies>
+					<module>
+					  <id>com.willwinder:serialcontrol</id>
+					</module>
                     <module>
                         <id>org.netbeans.api:org-netbeans-api-annotations-common</id>
                         <explicitValue>org.netbeans.api.annotations.common/1</explicitValue>
@@ -54,10 +57,25 @@
 
 
     <dependencies>
+	<dependency>
+		<groupId>org.netbeans.api</groupId>
+		  <artifactId>org-openide-io</artifactId>
+		  <version>RELEASE230</version>
+		</dependency>
+		<dependency>
+			<groupId>com.willwinder</groupId>
+			<artifactId>ugs-platform-plugin-serialControl</artifactId>
+			<version>${project.version}</version>
+		</dependency>
         <dependency>
             <groupId>org.netbeans.api</groupId>
             <artifactId>org-openide-dialogs</artifactId>
             <version>${netbeans.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.fazecast</groupId>
+            <artifactId>jSerialComm</artifactId>
+            <version>2.11.0</version> <!-- or latest stable version -->
         </dependency>
 
         <dependency>
