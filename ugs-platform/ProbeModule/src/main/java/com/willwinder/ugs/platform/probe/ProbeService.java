@@ -460,7 +460,8 @@ public class ProbeService implements UGSEventListener {
             sb.append("Z").append(Utils.formatter.format(z));
         }
 
-        gcode(String.format(WCS_PATTERN, wcs.getPValue(), sb));
+        // The values are in the probe units, which may differ from the units the controller is in
+        gcode(String.format(WCS_PATTERN, wcs.getPValue(), GcodeUtils.unitCommand(params.units) + " " + sb));
     }
 
     /**

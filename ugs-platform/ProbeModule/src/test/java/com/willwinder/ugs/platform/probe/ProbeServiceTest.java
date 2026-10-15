@@ -80,7 +80,7 @@ public class ProbeServiceTest {
         Position startPositionInUnits = pc.startPosition.getPositionIn(pc.units);
         double zPosition =  startPositionInUnits.z - probeZ.getPositionIn(pc.units).z + zProbedOffset;
 
-        order.verify(backend, times(1)).sendGcodeCommand(true, "G10 L20 P1 Z" + formatter.format(zPosition));
+        order.verify(backend, times(1)).sendGcodeCommand(true, "G10 L20 P1 G20 Z" + formatter.format(zPosition));
     }
 
     @Test
@@ -103,7 +103,7 @@ public class ProbeServiceTest {
         ps.UGSEvent(new ControllerStateEvent(ControllerState.IDLE, ControllerState.DISCONNECTED));
 
         InOrder order = inOrder(backend);
-        order.verify(backend, times(1)).sendGcodeCommand(true, "G10 L20 P2 X0Y0");
+        order.verify(backend, times(1)).sendGcodeCommand(true, "G10 L20 P2 G21 X0Y0");
 
         // probe Y axis
         order.verify(backend, times(1)).sendGcodeCommand(true, "G90 G21 G0 X" + pc.xSpacing);
@@ -135,7 +135,7 @@ public class ProbeServiceTest {
         double yProbeOffset = pc.startPosition.y - probeY.y + yDir * (radius + Math.abs(pc.yOffset));
 
         order.verify(backend, times(1)).sendGcodeCommand(true,
-                "G10 L20 P2 X" + formatter.format(xProbeOffset) + "Y" + formatter.format(yProbeOffset));
+                "G10 L20 P2 G21 X" + formatter.format(xProbeOffset) + "Y" + formatter.format(yProbeOffset));
     }
 
     @Test
@@ -161,7 +161,7 @@ public class ProbeServiceTest {
         ps.UGSEvent(new ControllerStateEvent(ControllerState.IDLE, ControllerState.RUN));
 
         InOrder order = inOrder(backend);
-        order.verify(backend, times(1)).sendGcodeCommand(true, "G10 L20 P2 X0Y0Z0");
+        order.verify(backend, times(1)).sendGcodeCommand(true, "G10 L20 P2 G21 X0Y0Z0");
 
         // Probe Z axis
         order.verify(backend, times(1)).probe("Z", pc.feedRate, pc.zSpacing, pc.units);
@@ -206,7 +206,7 @@ public class ProbeServiceTest {
         double zProbeOffset = pc.startPosition.z - probeZ.z;
 
         order.verify(backend, times(1)).sendGcodeCommand(true,
-                "G10 L20 P2 X" + formatter.format(xProbeOffset)
+                "G10 L20 P2 G21 X" + formatter.format(xProbeOffset)
                         + "Y" + formatter.format(yProbeOffset)
                         + "Z" + formatter.format(zProbeOffset));
     }
@@ -252,7 +252,7 @@ public class ProbeServiceTest {
 
         InOrder order = inOrder(backend);
         // step 0
-        order.verify(backend, times(1)).sendGcodeCommand(true, "G10 L20 P2 X0Y0");
+        order.verify(backend, times(1)).sendGcodeCommand(true, "G10 L20 P2 G21 X0Y0");
         order.verify(backend, times(1)).probe("X", pc.feedRate, -holeRadius, pc.units);
 
         // step 1
@@ -293,6 +293,6 @@ public class ProbeServiceTest {
 
         // step 8
         order.verify(backend, times(1)).sendGcodeCommand(true, "G53 G21 G0 Y-1");
-        order.verify(backend, times(1)).sendGcodeCommand(true, "G10 L20 P2 X0Y0");
+        order.verify(backend, times(1)).sendGcodeCommand(true, "G10 L20 P2 G21 X0Y0");
     }
 }
