@@ -18,22 +18,43 @@
  */
 package com.willwinder.ugs.platform.surfacescanner.io;
 
+import org.apache.commons.lang3.StringUtils;
+
 import javax.swing.filechooser.FileFilter;
 import java.io.File;
 
+/**
+ * A file filter for scan files with the extension .xyz in any case, like scan.xyz or scan.XYZ
+ */
 public class XyzFileFilter extends FileFilter {
+    public static final String EXTENSION = ".xyz";
+
     @Override
     public boolean accept(File f) {
-        // ✅ always show directories so you can navigate
-        if (f.isDirectory()) {
-            return true;
-        }
-        // ✅ accept all files (no extension filtering)
-        return true;
+        // Directories are shown so that they can be navigated
+        return f.isDirectory() || StringUtils.endsWithIgnoreCase(f.getName(), EXTENSION);
     }
 
     @Override
     public String getDescription() {
-        return "All files (*.*)";
+        return "XYZ scan files (*.xyz)";
+    }
+
+    /**
+     * Returns the file with the extension .xyz. A new file gets it in lower case, added if the name doesn't end with
+     * it. An existing file with it in another case, like scan.XYZ, is kept so that it is the file that is replaced.
+     *
+     * @param file the file
+     * @return the file with the extension .xyz
+     */
+    public static File withXyzExtension(File file) {
+        String name = file.getName();
+        if (StringUtils.endsWithIgnoreCase(name, EXTENSION)) {
+            if (file.exists()) {
+                return file;
+            }
+            name = name.substring(0, name.length() - EXTENSION.length());
+        }
+        return new File(file.getParentFile(), name + EXTENSION);
     }
 }

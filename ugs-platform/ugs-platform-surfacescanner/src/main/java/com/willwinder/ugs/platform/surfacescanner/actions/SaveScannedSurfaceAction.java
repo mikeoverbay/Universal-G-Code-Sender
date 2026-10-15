@@ -22,7 +22,8 @@ import com.willwinder.ugs.platform.surfacescanner.io.XyzFileFilter;
 import com.willwinder.ugs.platform.surfacescanner.SurfaceScanner;
 import com.willwinder.universalgcodesender.i18n.Localization;
 import com.willwinder.universalgcodesender.model.Position;
-import org.apache.commons.io.IOUtils;
+import com.willwinder.universalgcodesender.utils.GUIHelpers;
+import org.apache.commons.lang3.StringUtils;
 import org.openide.util.ImageUtilities;
 
 import javax.swing.*;
@@ -32,12 +33,15 @@ import java.io.IOException;
 import java.nio.charset.Charset;
 import java.nio.file.Files;
 import java.util.Optional;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 import static com.willwinder.ugs.platform.surfacescanner.Utils.fileChooser;
 
 public class SaveScannedSurfaceAction extends AbstractAction {
 
     public static final String ICON_BASE = "com/willwinder/ugs/platform/surfacescanner/icons/save.svg";
+    private static final Logger LOGGER = Logger.getLogger(SaveScannedSurfaceAction.class.getSimpleName());
 
     private final SurfaceScanner surfaceScanner;
 
@@ -55,17 +59,17 @@ public class SaveScannedSurfaceAction extends AbstractAction {
     }
 
     private static Optional<File> chooseSaveFile() {
-        fileChooser.setFileFilter(new XyzFileFilter());
-        int result = fileChooser.showSaveDialog(null);
+        // A chooser of its own that only offers xyz files, starting in the directory last used for saving or exporting
+        JFileChooser saveFileChooser = new JFileChooser(fileChooser.getCurrentDirectory());
+        saveFileChooser.setAcceptAllFileFilterUsed(false);
+        saveFileChooser.setFileFilter(new XyzFileFilter());
+        int result = saveFileChooser.showSaveDialog(null);
         if (result != JFileChooser.APPROVE_OPTION) {
             return Optional.empty();
         }
 
-        File selectedFile = fileChooser.getSelectedFile();
-        if (!selectedFile.getName().endsWith(".xyz")) {
-            selectedFile = new File(selectedFile.getAbsolutePath() + ".xyz");
-        }
-        return Optional.of(selectedFile);
+        fileChooser.setCurrentDirectory(saveFileChooser.getCurrentDirectory());
+        return Optional.of(XyzFileFilter.withXyzExtension(saveFileChooser.getSelectedFile()));
     }
 
     @Override
@@ -106,9 +110,12 @@ public class SaveScannedSurfaceAction extends AbstractAction {
         }
 
         try {
-            IOUtils.write(output, Files.newOutputStream(selectedFile.get().toPath()), Charset.defaultCharset());
+            // Closed when written, on a network share the file could otherwise be incomplete or stay locked
+            Files.writeString(selectedFile.get().toPath(), output, Charset.defaultCharset());
         } catch (IOException ex) {
-            throw new RuntimeException(ex);
+            LOGGER.log(Level.WARNING, "Could not save the scanned point file " + selectedFile.get(), ex);
+            GUIHelpers.displayErrorDialog("Could not save the scanned point file " + selectedFile.get().getName() + ": " +
+                    StringUtils.defaultIfEmpty(ex.getMessage(), ex.getClass().getSimpleName()));
         }
     }
 
