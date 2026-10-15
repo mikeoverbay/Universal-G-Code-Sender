@@ -111,6 +111,10 @@ public final class AutoLevelerTopComponent extends TopComponent implements UGSEv
 
     @Override
     public void componentClosed() {
+        // Closing the window removes the Stop button, so don't leave a scan running without it
+        if (scanner != null) {
+            scanner.requestStop();
+        }
         RenderableUtils.removeRenderable(autoLevelPreview);
         autoLevelPreview = null;
         meshLevelManager.clear();

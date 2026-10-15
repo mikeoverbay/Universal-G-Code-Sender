@@ -46,6 +46,10 @@ public class ScanSurfaceAction extends AbstractAction implements UGSEventListene
     private final BackendAPI backend;
 	
 	private static final RequestProcessor RP = new RequestProcessor(ScanSurfaceAction.class);
+	private static final String STOP_TITLE = "Stop scan";
+	// What the button currently shows (EDT only). A click on "Stop scan" must never start a scan,
+	// even if the scan ended just before the click was handled.
+	private boolean showingStop = false;
 
     public ScanSurfaceAction(SurfaceScanner surfaceScanner) {
         this.backend = CentralLookup.getDefault().lookup(BackendAPI.class);
@@ -54,17 +58,33 @@ public class ScanSurfaceAction extends AbstractAction implements UGSEventListene
         }
 
         this.surfaceScanner = surfaceScanner;
-        String title = Localization.getString("autoleveler.panel.scan-surface");
-        putValue(NAME, title);
-        putValue("menuText", title);
-        putValue(Action.SHORT_DESCRIPTION, title);
+        // Switch between Scan / Stop as the scan starts and ends
+        surfaceScanner.addListener(() -> SwingUtilities.invokeLater(this::updateState));
+
+        setTitle(Localization.getString("autoleveler.panel.scan-surface"));
         putValue("iconBase", ICON_BASE);
         putValue(SMALL_ICON, ImageUtilities.loadImageIcon(ICON_BASE, false));
         putValue(Action.SELECTED_KEY, false);
     }
 
+    private void setTitle(String title) {
+        putValue(NAME, title);
+        putValue("menuText", title);
+        putValue(Action.SHORT_DESCRIPTION, title);
+    }
+
+    private void updateState() {
+        showingStop = surfaceScanner.isScanning();
+        setTitle(showingStop ? STOP_TITLE : Localization.getString("autoleveler.panel.scan-surface"));
+        setEnabled(isEnabled());
+    }
+
     @Override
     public boolean isEnabled() {
+        // Stop must stay clickable while the machine is moving
+        if (surfaceScanner != null && surfaceScanner.isScanning()) {
+            return true;
+        }
         return backend != null && backend.isConnected() && backend.isIdle();
     }
 
@@ -72,6 +92,11 @@ public class ScanSurfaceAction extends AbstractAction implements UGSEventListene
 
 @Override
 public void actionPerformed(ActionEvent e) {
+    if (surfaceScanner.isScanning() || showingStop) {
+        surfaceScanner.requestStop();
+        return;
+    }
+
     if (surfaceScanner.isValid() && !shouldEraseProbedData()) {
         return;
     }
@@ -81,9 +106,27 @@ public void actionPerformed(ActionEvent e) {
 
     surfaceScanner.reset();
 
+    // Show Stop right away so a second click before the scan thread starts doesn't queue another scan
+    showingStop = true;
+    setTitle(STOP_TITLE);
+
     RP.post(() -> {
         try {
             surfaceScanner.scan();
+        } catch (SurfaceScanner.ProbeOverTravelException ex) {
+            SwingUtilities.invokeLater(() ->
+                DialogDisplayer.getDefault().notify(new NotifyDescriptor.Message(
+                    ex.getMessage(),
+                    NotifyDescriptor.ERROR_MESSAGE
+                ))
+            );
+        } catch (SurfaceScanner.ScanStoppedException ex) {
+            SwingUtilities.invokeLater(() ->
+                DialogDisplayer.getDefault().notify(new NotifyDescriptor.Message(
+                    ex.getMessage(),
+                    NotifyDescriptor.INFORMATION_MESSAGE
+                ))
+            );
         } catch (Exception ex) {
             SwingUtilities.invokeLater(() ->
                 DialogDisplayer.getDefault().notify(new NotifyDescriptor.Message(

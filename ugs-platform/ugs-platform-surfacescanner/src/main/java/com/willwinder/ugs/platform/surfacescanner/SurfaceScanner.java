@@ -58,6 +58,33 @@ public class SurfaceScanner {
 	private Position first = null;
 
     private final AtomicBoolean isScanning = new AtomicBoolean(false);
+    private final AtomicBoolean stopRequested = new AtomicBoolean(false);
+    private volatile Thread scanThread = null;
+    // Registered with the pendant only while this scanner is scanning
+    private final java.util.function.BooleanSupplier pendantStopHandler = this::requestStop;
+
+    /**
+     * Thrown out of {@link #scan()} when the user stopped the scan.
+     */
+    public static class ScanStoppedException extends RuntimeException {
+        public ScanStoppedException() {
+            this("Scan stopped. Home the probe before scanning again.");
+        }
+
+        public ScanStoppedException(String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * Thrown out of {@link #scan()} when the probe over travelled. The probe has already been
+     * told to retract; the message says whether it confirmed.
+     */
+    public static class ProbeOverTravelException extends RuntimeException {
+        public ProbeOverTravelException(String message) {
+            super(message);
+        }
+    }
 
     public SurfaceScanner(BackendAPI backend) {
         this.backend = backend;
@@ -65,6 +92,70 @@ public class SurfaceScanner {
         Position minPosition = new Position(settings.getMinX(), settings.getMinY(), settings.getMinZ(), backend.getSettings().getPreferredUnits());
         Position maxPosition = new Position(settings.getMaxX(), settings.getMaxY(), settings.getMaxZ(), backend.getSettings().getPreferredUnits());
         update(minPosition, maxPosition);
+    }
+
+    public boolean isScanning() {
+        return scanThread != null;
+    }
+
+    /**
+     * Stops a running scan: breaks the scan loop, feed-holds/resets the CNC and tells the probe to abort.
+     * Safe to call from any thread.
+     *
+     * @return true if a scan was running and is being stopped
+     */
+    public boolean requestStop() {
+        Thread t = scanThread;
+        if (t == null) {
+            return false;
+        }
+
+        logger.log(Level.INFO, "Stop requested for surface scan");
+        stopRequested.set(true);
+
+        // Wake the scan thread out of any sleep / serial wait. Done before the probe abort so a probe
+        // command not yet written is dropped instead of reaching the probe after the abort.
+        t.interrupt();
+
+        // Stop the probe's own Z motion
+        serialControl.abortProbe();
+
+        // Stop the CNC: feed hold, then GRBL soft-resets once motion has stopped (keeps position)
+        try {
+            backend.cancel();
+        } catch (Exception e) {
+            logger.log(Level.WARNING, "Could not cancel controller motion", e);
+        }
+        return true;
+    }
+
+    private void checkStop() {
+        if (stopRequested.get()) {
+            throw new ScanStoppedException();
+        }
+    }
+
+    /**
+     * backend.cancel() in {@link #requestStop()} does nothing while UGS still thinks the machine is idle,
+     * which is the case for up to one status poll after a move was sent. Watch briefly and cancel any
+     * move that shows up. Runs on the scan thread.
+     */
+    private void haltMachineAfterStop() {
+        Thread.interrupted(); // clear the stop interrupt so we can wait
+        long end = System.currentTimeMillis() + 1000;
+        try {
+            while (System.currentTimeMillis() < end) {
+                if (backend.canPause()) {
+                    backend.cancel();
+                    return;
+                }
+                Thread.sleep(50);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            logger.log(Level.WARNING, "Could not cancel controller motion after stop", e);
+        }
     }
 
     public boolean isProbeReady() {
@@ -129,7 +220,7 @@ public class SurfaceScanner {
             moveToSafeStartPoint(probePosition);
         } else {
             //double retractedZ = retract(probePosition.getZ());
-            probeNextPoint(null);
+            probeRemainingPoints();
         }
     }
 
@@ -193,20 +284,54 @@ public class SurfaceScanner {
      * the scan.
      */
     public void scan() {
+        stopRequested.set(false);
+        scanThread = Thread.currentThread();
         isScanning.set(true);
-        Position work = backend.getWorkPosition();
-        Position machine = backend.getMachinePosition();
-        machineWorkOffset = new Position(work.getUnits());
-        machineWorkOffset.x = work.x - machine.x;
-        machineWorkOffset.y = work.y - machine.y;
-        machineWorkOffset.z = work.z - machine.z;
+        // Let the pendant's cancel key stop this scan
+        serialControl.setScanStopHandler(pendantStopHandler);
+        listeners.forEach(SurfaceScannerListener::onScannerUpdate);
 
-        moveToSafeStartPoint(work);
-        probeNextPoint(maxXYZ.getZ());
+        try {
+            Position work = backend.getWorkPosition();
+            Position machine = backend.getMachinePosition();
+            machineWorkOffset = new Position(work.getUnits());
+            machineWorkOffset.x = work.x - machine.x;
+            machineWorkOffset.y = work.y - machine.y;
+            machineWorkOffset.z = work.z - machine.z;
+
+            moveToSafeStartPoint(work);
+            probeRemainingPoints();
+        } finally {
+            serialControl.clearScanStopHandler(pendantStopHandler);
+            scanThread = null;
+            isScanning.set(false);
+            // Don't leave an interrupt from requestStop() on the pooled worker thread
+            Thread.interrupted();
+            listeners.forEach(SurfaceScannerListener::onScannerUpdate);
+        }
+    }
+
+    /**
+     * Resets the scan and returns the exception to throw: the {@link ProbeOverTravelException} as is,
+     * a {@link ScanStoppedException} if the user stopped the scan, otherwise the original failure.
+     */
+    private RuntimeException scanFailed(Exception e) {
+        setProbeReady(false);
+        reset();
+        if (e instanceof ProbeOverTravelException overTravel) {
+            return overTravel;
+        }
+        if (stopRequested.get() || e instanceof ScanStoppedException) {
+            haltMachineAfterStop();
+            return new ScanStoppedException();
+        }
+        return new RuntimeException(e);
     }
 
     private void moveToSafeStartPoint(Position currentPosition) {
     try {
+        checkStop();
+
         // Move to the first XY point
         first = minXYZ.getPositionIn(getPreferredUnits());
         moveXYAndWait(first, 15000);
@@ -214,11 +339,19 @@ public class SurfaceScanner {
         setProbeReady(true);
 
     } catch (Exception e) {
-        setProbeReady(false);
-        reset();
-        throw new RuntimeException(e);
+        throw scanFailed(e);
     }
 }
+
+    /**
+     * Probes every pending point in order, then retracts the probe. Checks for a stop request between points.
+     */
+    private void probeRemainingPoints() {
+        while (!pendingPositions.isEmpty()) {
+            probeNextPoint();
+        }
+        finishScan();
+    }
 
 
     public Optional<Position> getNextProbePoint() {
@@ -248,14 +381,10 @@ public class SurfaceScanner {
         }
     }
 	
-private void moveXYAndWait(Position target, long timeoutMs) throws Exception {
-    // Use preferred units for all comparisons
+private void moveXYAndWait(Position target, long minTimeoutMs) throws Exception {
     UnitUtils.Units preferred = backend.getSettings().getPreferredUnits();
-
-    // Ensure target is in the same units we will compare against
     Position t = target.getPositionIn(preferred);
 
-    // Build XY-only move in the same units (G90 absolute, G0 rapid)
     PartialPosition startPos = PartialPosition.builder(t)
             .clearZ()
             .clearABC()
@@ -263,34 +392,66 @@ private void moveXYAndWait(Position target, long timeoutMs) throws Exception {
 
     String cmd = GcodeUtils.generateMoveCommand("G90G0", getProbeScanFeedRate(), startPos);
     logger.log(Level.INFO, "MoveTo {0} {1}", new Object[]{startPos, cmd});
+
+    // Calculate expected travel time with a 3x safety margin
+    Position currentWork = backend.getWorkPosition().getPositionIn(preferred);
+    double dx = t.getX() - currentWork.getX();
+    double dy = t.getY() - currentWork.getY();
+    double distance = Math.sqrt(dx * dx + dy * dy);
+
+    // Feed rate is in units-per-minute; convert to units-per-millisecond
+    double feedRate = getProbeScanFeedRate();  // units/min
+    // No usable feed rate: fall back to the minimum timeout instead of waiting forever
+    double expectedMs = feedRate > 0 ? (distance / feedRate) * 60000.0 : 0;
+
+    // Use 3x expected time, plus 2 second buffer, with a floor of minTimeoutMs
+    long calculatedTimeout = (long)(expectedMs * 3.0 + 2000);
+    long timeoutMs = Math.max(minTimeoutMs, calculatedTimeout);
+
+    logger.log(Level.INFO, "Move distance={0}, expectedMs={1}, timeout={2}",
+            new Object[]{distance, expectedMs, timeoutMs});
+
+    checkStop();
     backend.sendGcodeCommand(true, cmd);
 
-    // Wait for controller to be idle AND at the requested XY (in preferred units)
-    long start = System.currentTimeMillis();
+    // Give GRBL a moment to actually start moving
+    Thread.sleep(150);
 
-    // Tolerance in preferred units
+    long start = System.currentTimeMillis();
     double tol = (preferred == UnitUtils.Units.MM) ? 0.05 : 0.002;
+    boolean sawNotIdle = false;
 
     while (System.currentTimeMillis() - start < timeoutMs) {
-        // Convert current work position to preferred units
+        checkStop();
         Position w = backend.getWorkPosition().getPositionIn(preferred);
+        boolean idle = backend.isIdle();
+
+        if (!idle) {
+            sawNotIdle = true;
+        }
 
         boolean atXY =
                 Math.abs(w.getX() - t.getX()) <= tol &&
                 Math.abs(w.getY() - t.getY()) <= tol;
 
-        if (backend.isIdle() && atXY) {
+        // Done if idle, at target, AND we've seen actual motion (or this was a no-op)
+        if (idle && atXY && (sawNotIdle || (System.currentTimeMillis() - start > 500))) {
             return;
         }
 
         Thread.sleep(25);
     }
 
-    throw new RuntimeException("Timeout waiting for XY move to complete.");
+    throw new RuntimeException("Timeout waiting for XY move to complete after " + timeoutMs + "ms.");
 }
 
-    private void probeNextPoint(Double zBackoff) {
+    /**
+     * Moves to the next pending point and probes it. An over travel retracts the probe and
+     * throws {@link ProbeOverTravelException}.
+     */
+    private void probeNextPoint() {
     try {
+        checkStop();
         if (!isProbeReady()) {
             throw new RuntimeException("Probe not ready.");
         }
@@ -301,12 +462,15 @@ private void moveXYAndWait(Position target, long timeoutMs) throws Exception {
         // Move to the XY point and wait until motion completes
         moveXYAndWait(target, 15000);
 
+		checkStop();
 		double zr = settings.getZRetract();
 		sendZRetractToProbe(zr);
 
 
         // Now read probe measurement
+        checkStop();
         String resp = serialControl.sendAndReceiveProbe("P\n", 9000);
+        checkStop();
         if (resp == null) {
             setProbeReady(false);
             throw new RuntimeException("No response from probe to P.");
@@ -315,23 +479,7 @@ private void moveXYAndWait(Position target, long timeoutMs) throws Exception {
         resp = resp.trim();
 
 		if ("E".equalsIgnoreCase(resp) || "ERROR".equalsIgnoreCase(resp)) {
-			setProbeReady(false);
-			reset();
-
-			// Send to output (fallback)
-			System.out.println("[Probe] Over Travel Error");
-
-			// Popup (NetBeans platform)
-			try {
-				org.openide.DialogDisplayer.getDefault().notify(
-					new org.openide.NotifyDescriptor.Message(
-						"Over Travel Error",
-						org.openide.NotifyDescriptor.ERROR_MESSAGE
-					)
-				);
-			} catch (Throwable ignore) {}
-
-			return;
+			throw overTravel("Probe reported over travel while probing.");
 		}
 
 
@@ -352,11 +500,19 @@ private void moveXYAndWait(Position target, long timeoutMs) throws Exception {
         Position measured = new Position(target.getX(), target.getY(), z, getPreferredUnits());
         probeEvent(measured); // should pop pendingPositions
 
-		if (!pendingPositions.isEmpty()) {
-			probeNextPoint(null);
-		} else {
-			// Done probing all points: retract probe out of the way
-			resp = serialControl.sendAndReceiveProbe("H\n", 9000);
+    } catch (Exception e) {
+        throw scanFailed(e);
+    }
+}
+
+    /**
+     * Done probing all points: retract probe out of the way and return to the first point.
+     */
+    private void finishScan() {
+    try {
+			checkStop();
+			String resp = serialControl.sendAndReceiveProbe("H\n", 9000);
+			checkStop();
 
 			if (resp == null) {
 				setProbeReady(false);
@@ -380,61 +536,60 @@ private void moveXYAndWait(Position target, long timeoutMs) throws Exception {
 			if (first != null) {
 				moveXYAndWait(first, 15000);
 			}
-		}
-
 
     } catch (Exception e) {
+        // Every point is already probed: keep the data, only the retract / return didn't finish
         setProbeReady(false);
-        reset();
-        throw new RuntimeException(e);
+        if (stopRequested.get() || e instanceof ScanStoppedException) {
+            haltMachineAfterStop();
+            throw new ScanStoppedException("Scan complete, data kept.\n"
+                    + "The final probe retract / return move was stopped. Home the probe before moving the machine.");
+        }
+        throw new RuntimeException("the final probe retract / return did not finish (scan data was kept): " + e.getMessage(), e);
     }
 }
 
-private boolean sendZRetractToProbe(double zr) {
+/**
+ * Sends the Z retract distance to the probe. Any failure is treated as an over travel:
+ * the probe is retracted and the scan is cancelled.
+ */
+private void sendZRetractToProbe(double zr) {
     String cmd = String.format(java.util.Locale.US, "ZR:%.3f\n", zr);
 
-	String resp;
-	try {
-		resp = serialControl.sendAndReceiveProbe(cmd,9000);   // assumes it returns a line String (or null/empty on timeout)
-	} catch (Exception ex) {
-		showProbePopupAndOutput("Over Travel Error"); // or "Failed to send Z retract"
-		return false;
-	}
+	String resp = serialControl.sendAndReceiveProbe(cmd, 9000);
+	checkStop();
 
 	if (resp == null) {
-		showProbePopupAndOutput("Over Travel Error"); // or "No response from probe"
-		return false;
+		throw overTravel("No response from probe to Z retract (ZR).");
 	}
 
 	resp = resp.trim();
 	if (resp.equalsIgnoreCase("E") || resp.equalsIgnoreCase("ERROR") || resp.toUpperCase().startsWith("ERR")) {
-		showProbePopupAndOutput("Over Travel Error");
-		return false;
+		throw overTravel("Probe reported an error on Z retract (ZR).");
 	}
 
 	// Accept common ACKs: "OK", "OK ZR=0.750", etc.
 	if (!resp.toUpperCase().startsWith("OK")) {
-		showProbePopupAndOutput("Over Travel Error"); // or "Unexpected probe response: " + resp
-		return false;
+		throw overTravel("Unexpected probe response to Z retract (ZR): " + resp);
 	}
-
-	return true;
 }
 
-// Put this in the same class (SurfaceScanner / AutoLevelerPanel) where you're doing the check.
-private void showProbePopupAndOutput(String msg) {
-    // Output window fallback (no extra dependencies)
-    System.out.println("[Probe] " + msg);
+/**
+ * Retracts (homes) the probe after an over travel and returns the exception that cancels the scan.
+ */
+private ProbeOverTravelException overTravel(String reason) {
+    logger.log(Level.WARNING, "Probe over travel: {0}", reason);
+    setProbeReady(false);
 
-    // Popup (NetBeans Platform)
-    try {
-        org.openide.DialogDisplayer.getDefault().notify(
-            new org.openide.NotifyDescriptor.Message(
-                msg,
-                org.openide.NotifyDescriptor.ERROR_MESSAGE
-            )
-        );
-    } catch (Throwable ignore) {}
+    // Get the probe out of the way before giving up
+    String resp = serialControl.sendAndReceiveProbe("H\n", 9000);
+    if (resp != null && "homed".equalsIgnoreCase(resp.trim())) {
+        return new ProbeOverTravelException("Over Travel Error\n" + reason + "\nProbe retracted, scan cancelled.");
+    }
+
+    return new ProbeOverTravelException("Over Travel Error\n" + reason
+            + "\nProbe did NOT confirm retract (response: " + resp + "). Check the probe before moving the machine."
+            + "\nScan cancelled.");
 }
 
 	private double getProbeScanFeedRate() {

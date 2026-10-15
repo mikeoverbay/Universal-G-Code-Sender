@@ -51,6 +51,28 @@ public class serialControl implements Runnable {
     private volatile int liveFeedRate = 0;
     private volatile int liveSpindleSpeed = 0;
 
+    // Sent to the probe to stop its Z motion immediately. The probe firmware must handle this.
+    public static final String PROBE_ABORT_COMMAND = "A\n";
+
+    // Set by the surface scanner; returns true if it stopped a running scan
+    private static volatile java.util.function.BooleanSupplier scanStopHandler;
+
+    // Orders probe writes so an abort can never be overtaken by a command from the scan thread
+    private static final Object probeWriteLock = new Object();
+
+    public static synchronized void setScanStopHandler(java.util.function.BooleanSupplier handler) {
+        scanStopHandler = handler;
+    }
+
+    /**
+     * Removes the handler, but only if it is still the given one (a newer scan may have replaced it).
+     */
+    public static synchronized void clearScanStopHandler(java.util.function.BooleanSupplier handler) {
+        if (scanStopHandler == handler) {
+            scanStopHandler = null;
+        }
+    }
+
     /* -------------------------------------------------- */
  /*  Helper                                             */
  /* -------------------------------------------------- */
@@ -241,11 +263,19 @@ public static String sendAndReceiveProbe(String command, int timeoutMillis) {
         OutputStream out = probePort.getOutputStream();
         InputStream in = probePort.getInputStream();
 
-        // Clear buffer before sending
-        while (in.available() > 0) in.read();
+        synchronized (probeWriteLock) {
+            // A stop already interrupted this thread: don't start a new probe move after the abort
+            if (Thread.currentThread().isInterrupted()) {
+                io.getOut().println("[Probe] Not sending " + command.trim() + ", scan stopped.");
+                return null;
+            }
 
-        out.write(command.getBytes());
-        out.flush();
+            // Clear buffer before sending
+            while (in.available() > 0) in.read();
+
+            out.write(command.getBytes());
+            out.flush();
+        }
 		Thread.sleep(500); // Wait 0.5 seconds before reading
 
         long start = System.currentTimeMillis();
@@ -268,11 +298,39 @@ public static String sendAndReceiveProbe(String command, int timeoutMillis) {
         }
 
         io.getErr().println("[Probe] Timeout waiting for response.");
+    } catch (InterruptedException ex) {
+        // Scan was stopped; keep the interrupt so the caller sees it
+        Thread.currentThread().interrupt();
+        io.getOut().println("[Probe] Wait interrupted.");
     } catch (Exception ex) {
         io.getErr().println("[Probe] Comm error: " + ex.getMessage());
     }
 
     return null;
+}
+
+/**
+ * Tells the probe to stop moving right away. Does not wait for a reply, so it is safe to call
+ * while another thread is blocked in {@link #sendAndReceiveProbe}.
+ */
+public static void abortProbe() {
+    if (probePort == null || !probePort.isOpen()) {
+        return;
+    }
+
+    try {
+        byte[] cmd = PROBE_ABORT_COMMAND.getBytes();
+        synchronized (probeWriteLock) {
+            probePort.writeBytes(cmd, cmd.length);
+        }
+        if (io != null) {
+            io.getOut().println("[Probe] Abort sent.");
+        }
+    } catch (Exception ex) {
+        if (io != null) {
+            io.getErr().println("[Probe] Abort failed: " + ex.getMessage());
+        }
+    }
 }
 
 
@@ -432,7 +490,11 @@ public static String sendAndReceiveProbe(String command, int timeoutMillis) {
                     backend.pauseResume();
                     break;
                 case 27:
-                    backend.cancel();
+                    // Cancel stops a running surface scan first, otherwise cancels the job
+                    java.util.function.BooleanSupplier stopScan = scanStopHandler;
+                    if (stopScan == null || !stopScan.getAsBoolean()) {
+                        backend.cancel();
+                    }
                     break;
                 default:
                     io.getErr().println("[Warning] Unknown code: " + code);
