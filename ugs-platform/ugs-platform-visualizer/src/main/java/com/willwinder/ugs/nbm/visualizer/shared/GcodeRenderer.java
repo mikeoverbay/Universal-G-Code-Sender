@@ -49,7 +49,9 @@ import java.awt.Font;
 import java.awt.Point;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -111,6 +113,13 @@ public class GcodeRenderer implements GLEventListener, IRenderableRegistrationSe
     private final java.util.List<Renderable> objects;
     private boolean idle = true;
 
+    // The area of the renderables that the view was fitted to while no gcode file is loaded
+    private RenderableBounds fittedRenderableBounds;
+
+    // Draw the view again when a renderable has changed, like a loaded surface scan
+    private final Set<Runnable> repaintListeners = new CopyOnWriteArraySet<>();
+    private final RenderableListener renderableListener = this::requestRepaint;
+
     // Preferences
     private java.awt.Color clearColor;
 
@@ -166,6 +175,8 @@ public class GcodeRenderer implements GLEventListener, IRenderableRegistrationSe
         if (!objects.contains(r)) {
             objects.add(r);
             Collections.sort(objects);
+            r.addListener(renderableListener);
+            requestRepaint();
         }
     }
 
@@ -175,7 +186,26 @@ public class GcodeRenderer implements GLEventListener, IRenderableRegistrationSe
         if (objects.contains(r)) {
             objects.remove(r);
             Collections.sort(objects);
+            r.removeListener(renderableListener);
+            requestRepaint();
         }
+    }
+
+    /**
+     * Adds a listener that draws the view again, it is called when a renderable is added, removed or has changed
+     *
+     * @param listener the listener
+     */
+    public void addRepaintListener(Runnable listener) {
+        repaintListeners.add(listener);
+    }
+
+    public void removeRepaintListener(Runnable listener) {
+        repaintListeners.remove(listener);
+    }
+
+    private void requestRepaint() {
+        repaintListeners.forEach(Runnable::run);
     }
 
     /**
@@ -285,7 +315,7 @@ public class GcodeRenderer implements GLEventListener, IRenderableRegistrationSe
         resizeForCamera(objectMin, objectMax, 0.9);
     }
 
-    public void setObjectSize(Position min, Position max) {
+    public synchronized void setObjectSize(Position min, Position max) {
         if (min == null || max == null) {
             this.objectMin = new Position(-10, -10, -10);
             this.objectMax = new Position(10, 10, 10);
@@ -295,6 +325,30 @@ public class GcodeRenderer implements GLEventListener, IRenderableRegistrationSe
             this.objectMax = max;
             idle = false;
         }
+
+        // Fitted to the renderables again if the gcode file was unloaded
+        fittedRenderableBounds = null;
+        resizeForCamera(objectMin, objectMax, 0.9);
+    }
+
+    /**
+     * Fits the view to what the enabled renderables draw, like a loaded surface scan, while no gcode file is loaded.
+     * It is only done when that area changes so that the view can still be moved, and the view is kept if they are
+     * hidden.
+     */
+    private synchronized void fitToRenderables() {
+        if (!idle) {
+            return;
+        }
+
+        RenderableBounds bounds = RenderableBounds.of(objects);
+        if (bounds == null || bounds.equals(fittedRenderableBounds)) {
+            return;
+        }
+
+        fittedRenderableBounds = bounds;
+        objectMin = bounds.min();
+        objectMax = bounds.max();
         resizeForCamera(objectMin, objectMax, 0.9);
     }
 
@@ -345,6 +399,7 @@ public class GcodeRenderer implements GLEventListener, IRenderableRegistrationSe
      */
     @Override
     public void display(GLAutoDrawable drawable) {
+        fitToRenderables();
         this.setupPerpective(this.xSize, this.ySize, drawable, ortho);
 
         final GL2 gl = drawable.getGL().getGL2();

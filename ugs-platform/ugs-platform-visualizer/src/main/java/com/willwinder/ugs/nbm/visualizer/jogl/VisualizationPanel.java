@@ -48,6 +48,8 @@ public class VisualizationPanel extends JPanel {
 
     private GLJPanel panel;
     private transient RendererInputHandler rih;
+    private transient GcodeRenderer renderer;
+    private transient Runnable repaintListener;
 
     public VisualizationPanel() {
         backend = CentralLookup.getDefault().lookup(BackendAPI.class);
@@ -77,6 +79,7 @@ public class VisualizationPanel extends JPanel {
         LOGGER.log(Level.INFO, "Component closed, panel = " + panel);
         if (panel == null) return;
 
+        renderer.removeRepaintListener(repaintListener);
         remove(panel);
 
         LOGGER.info("Destroying panel");
@@ -93,7 +96,7 @@ public class VisualizationPanel extends JPanel {
         GLCapabilities glCaps = new GLCapabilities(null);
         final GLJPanel p = new GLJPanel(glCaps);
 
-        GcodeRenderer renderer = Lookup.getDefault().lookup(GcodeRenderer.class);
+        renderer = Lookup.getDefault().lookup(GcodeRenderer.class);
         if (renderer == null) {
             throw new IllegalArgumentException("Failed to access GcodeRenderer.");
         }
@@ -126,6 +129,10 @@ public class VisualizationPanel extends JPanel {
         p.addMouseListener(this.rih);
 
         p.addGLEventListener(renderer);
+
+        // The animator only runs once the view has been used, until then draw when for instance a scan is loaded
+        repaintListener = p::repaint;
+        renderer.addRepaintListener(repaintListener);
 
         return p;
     }

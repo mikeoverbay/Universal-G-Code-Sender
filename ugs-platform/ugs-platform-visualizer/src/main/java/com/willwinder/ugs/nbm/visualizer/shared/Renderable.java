@@ -23,6 +23,7 @@ import com.willwinder.ugs.nbm.visualizer.options.VisualizerOptions;
 import com.willwinder.universalgcodesender.model.Position;
 
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -116,8 +117,23 @@ public abstract class Renderable implements Comparable<Renderable> {
 
     public abstract void draw(GLAutoDrawable drawable, boolean idle, Position machineCoord, Position workCoord, Position objectMin, Position objectMax, double scaleFactor, Position mouseWorldCoordinates, Position rotation);
 
+    /**
+     * Returns the area this renderable draws in, in millimeters. While no gcode file is loaded the view is fitted to
+     * the area of the enabled renderables, so that for instance a loaded surface scan is shown. Renderables that are
+     * drawn around the gcode file or the machine return an empty optional.
+     *
+     * @return the area this renderable draws in or an empty optional
+     */
+    public Optional<RenderableBounds> getBounds() {
+        return Optional.empty();
+    }
+
     public void addListener(RenderableListener listener) {
         listeners.add(listener);
+    }
+
+    public void removeListener(RenderableListener listener) {
+        listeners.remove(listener);
     }
 
     protected void notifyListeners() {

@@ -26,12 +26,15 @@ import com.jogamp.opengl.util.gl2.GLUT;
 import com.willwinder.ugs.nbm.visualizer.options.VisualizerOptions;
 import static com.willwinder.ugs.nbm.visualizer.options.VisualizerOptions.VISUALIZER_OPTION_AUTOLEVEL_PREVIEW;
 import com.willwinder.ugs.nbm.visualizer.shared.Renderable;
+import com.willwinder.ugs.nbm.visualizer.shared.RenderableBounds;
 import com.willwinder.universalgcodesender.model.CNCPoint;
 import com.willwinder.universalgcodesender.model.Position;
 import com.willwinder.universalgcodesender.model.UnitUtils;
 import com.willwinder.universalgcodesender.model.UnitUtils.Units;
 
 import java.util.Arrays;
+import java.util.Collection;
+import java.util.Optional;
 import java.util.stream.DoubleStream;
 
 /**
@@ -42,6 +45,9 @@ public class AutoLevelPreview extends Renderable {
 
     private ImmutableCollection<Position> positions;
     private Position[][] grid = null;
+
+    // The area of the probe points in millimeters
+    private volatile RenderableBounds bounds;
 
     // The maximum distance of a probe used for coloring.
     private double maxZ;
@@ -86,7 +92,62 @@ public class AutoLevelPreview extends Renderable {
             this.positions = positions;
             this.grid = grid;
             updateMinMaxZ();
+            bounds = boundsOf(positions);
+            notifyListeners();
         }
+    }
+
+    /**
+     * The view is fitted to the probe points when no gcode file is loaded
+     */
+    @Override
+    public Optional<RenderableBounds> getBounds() {
+        return Optional.ofNullable(bounds);
+    }
+
+    /**
+     * Returns the area of the positions in millimeters. A single row or point is widened by 10 mm on each side.
+     *
+     * @param positions the probe points
+     * @return the area or null if no position has a known X and Y
+     */
+    static RenderableBounds boundsOf(Collection<Position> positions) {
+        double minX = Double.MAX_VALUE;
+        double minY = Double.MAX_VALUE;
+        double minZ = Double.MAX_VALUE;
+        double maxX = -Double.MAX_VALUE;
+        double maxY = -Double.MAX_VALUE;
+        double maxZ = -Double.MAX_VALUE;
+        for (Position position : positions) {
+            // An unknown value would make the whole view unknown
+            Position p = position.getPositionIn(Units.MM);
+            if (!Double.isFinite(p.x) || !Double.isFinite(p.y)) {
+                continue;
+            }
+            double z = Double.isFinite(p.z) ? p.z : 0;
+
+            minX = Math.min(minX, p.x);
+            minY = Math.min(minY, p.y);
+            minZ = Math.min(minZ, z);
+            maxX = Math.max(maxX, p.x);
+            maxY = Math.max(maxY, p.y);
+            maxZ = Math.max(maxZ, z);
+        }
+
+        if (minX > maxX) {
+            return null;
+        }
+
+        // A single row or point has no size to fit the view to
+        if (maxX - minX < 1) {
+            minX -= 10;
+            maxX += 10;
+        }
+        if (maxY - minY < 1) {
+            minY -= 10;
+            maxY += 10;
+        }
+        return new RenderableBounds(new Position(minX, minY, minZ, Units.MM), new Position(maxX, maxY, maxZ, Units.MM));
     }
 
     @Override

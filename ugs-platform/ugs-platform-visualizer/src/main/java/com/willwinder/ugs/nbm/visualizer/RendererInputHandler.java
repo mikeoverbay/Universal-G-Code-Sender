@@ -120,8 +120,13 @@ public class RendererInputHandler implements
 
     public void setGcodeFile(String file) {
         gcodeModel.setGcodeFile(file);
-        gcodeRenderer.setObjectSize(gcodeModel.getMin(), gcodeModel.getMax());
+        if (file == null) {
+            // The model keeps the size of the unloaded file, but there is no file to fit the view to anymore
+            gcodeRenderer.setObjectSize(null, null);
+            return;
+        }
 
+        gcodeRenderer.setObjectSize(gcodeModel.getMin(), gcodeModel.getMax());
         updateBounds(gcodeModel.getMin(), gcodeModel.getMax());
     }
 
