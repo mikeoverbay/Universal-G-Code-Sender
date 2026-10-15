@@ -373,20 +373,14 @@ public static void abortProbe() {
                 return;
             }
 
-            Position p = apiReadOnly.getWorkPosition();
-            boolean metric = (jogService.getUnits() == Units.MM);
+            // The pendant shows inches. The position is in the units reported by the controller, not the UI units.
+            Position p = apiReadOnly.getWorkPosition().getPositionIn(Units.INCH);
 
             float x = (float) p.getX();
             float y = (float) p.getY();
             float z = (float) p.getZ();
 
             float a = (float) (Double.isNaN(p.getA()) ? 0 : p.getA());
-            if (metric) {
-                x /= 25.4;
-                y /= 25.4;
-                z /= 25.4;
-                a /= 25.4;
-            }
 
             long total = apiReadOnly.getNumRows();
             long sent = apiReadOnly.getNumSentRows();
