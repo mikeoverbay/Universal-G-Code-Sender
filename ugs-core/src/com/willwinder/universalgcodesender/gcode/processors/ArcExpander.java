@@ -18,7 +18,6 @@
  */
 package com.willwinder.universalgcodesender.gcode.processors;
 
-import com.google.common.collect.Iterables;
 import com.willwinder.universalgcodesender.gcode.GcodeParser.GcodeMeta;
 import com.willwinder.universalgcodesender.gcode.GcodePreprocessorUtils;
 import com.willwinder.universalgcodesender.gcode.GcodePreprocessorUtils.SplitCommand;
@@ -27,8 +26,10 @@ import com.willwinder.universalgcodesender.gcode.util.Code;
 import static com.willwinder.universalgcodesender.gcode.util.Code.G1;
 import com.willwinder.universalgcodesender.gcode.util.GcodeParserException;
 import com.willwinder.universalgcodesender.gcode.util.GcodeParserUtils;
+import com.willwinder.universalgcodesender.gcode.util.Plane;
 import com.willwinder.universalgcodesender.gcode.util.PlaneFormatter;
 import com.willwinder.universalgcodesender.i18n.Localization;
+import com.willwinder.universalgcodesender.model.Axis;
 import com.willwinder.universalgcodesender.model.Position;
 import com.willwinder.universalgcodesender.types.PointSegment;
 import java.text.DecimalFormat;
@@ -47,6 +48,7 @@ public class ArcExpander implements CommandProcessor {
     private final boolean convertToLines;
     private final double length;
     private final DecimalFormat df;
+    private final boolean requireKnownPosition;
 
     @Override
     public String getHelp() {
@@ -65,6 +67,7 @@ public class ArcExpander implements CommandProcessor {
 
         // Setup decimal formatter
         df = new DecimalFormat("#.#########", Localization.dfs);
+        requireKnownPosition = false;
     }
 
     /**
@@ -72,9 +75,21 @@ public class ArcExpander implements CommandProcessor {
      * @param length the length of each smaller segment.
      */
     public ArcExpander(boolean convertToLines, double length, DecimalFormat df) {
+        this(convertToLines, length, df, false);
+    }
+
+    /**
+     * @param convertToLines       toggles if smaller lines or arcs are returned.
+     * @param length               the length of each smaller segment.
+     * @param requireKnownPosition only expand arcs whose start is a known position in the work coordinate system,
+     *                             and leave lines in machine coordinates, after a tool change etc. as they are. Used
+     *                             when the segments are rewritten again afterwards, like by the mesh leveler.
+     */
+    public ArcExpander(boolean convertToLines, double length, DecimalFormat df, boolean requireKnownPosition) {
         this.convertToLines = convertToLines;
         this.length = length;
         this.df = df;
+        this.requireKnownPosition = requireKnownPosition;
     }
 
     @Override
@@ -91,21 +106,61 @@ public class ArcExpander implements CommandProcessor {
             return Collections.singletonList(command);
         }
 
-        SplitCommand sc = GcodePreprocessorUtils.extractMotion(c, command);
-        if (sc.remainder.length() > 0) {
-            results.add(sc.remainder);
+        GcodeMeta arcMeta = commands.stream().filter(m -> m.code == c).findFirst().orElseThrow(IllegalStateException::new);
+        PointSegment ps = arcMeta.point;
+        Position start = new Position(state.currentPoint);
+        Position end = new Position(arcMeta.point.point());
+        PlaneFormatter plane = new PlaneFormatter(ps.getPlaneState());
+        Axis[] planeAxes = planeAxes(ps.getPlaneState());
+
+        if (requireKnownPosition) {
+            if (CoordinateRewriteGuard.mustPassThrough(command, commands, state)) {
+                return passThrough(command, c);
+            }
+
+            // Absolute segments, or an absolute arc center, need the start of the arc. If it is unknown in the plane
+            // (after G53/G28/G30/G38.x/G92/G10, M6, M0, a change of work coordinate system) leave the arc as it is
+            // instead of generating segments from a guessed start.
+            boolean needsStart = arcMeta.state.inAbsoluteMode || arcMeta.state.inAbsoluteIJKMode;
+            if (needsStart && (!state.isPositionKnown(planeAxes[0]) || !state.isPositionKnown(planeAxes[1]))) {
+                return passThrough(command, c);
+            }
+
+            // If the axis across the plane is unknown (a 2D program, or Z after G28), expand the arc in its plane
+            // without writing that axis. A helical arc that moves it can't be expanded.
+            if (needsStart && !state.isPositionKnown(planeAxes[2])) {
+                if (!Double.isNaN(GcodePreprocessorUtils.parseCoord(GcodePreprocessorUtils.splitCommand(command), planeAxes[2].name().charAt(0)))) {
+                    return passThrough(command, c);
+                }
+                plane.setLinear(start, Double.NaN);
+                plane.setLinear(end, Double.NaN);
+            }
         }
 
-        GcodeMeta arcMeta = Iterables.getLast(commands);
-        PointSegment ps = arcMeta.point;
-        Position start = state.currentPoint;
-        Position end = arcMeta.point.point();
+        // Without a start in the plane there is nothing to expand from. Keep the arc instead of dropping it.
+        if (Double.isNaN(plane.axis0(start)) || Double.isNaN(plane.axis1(start))) {
+            return passThrough(command, c);
+        }
 
         List<Position> points = GcodePreprocessorUtils.generatePointsAlongArcBDring(
                 start, end, ps.center(), ps.isClockwise(),
-                ps.getRadius(), 0, this.length, new PlaneFormatter(ps.getPlaneState()));
+                ps.getRadius(), 0, this.length, plane);
+
+        SplitCommand sc = GcodePreprocessorUtils.extractMotion(c, command);
+        if (sc == null) {
+            return Collections.singletonList(command);
+        }
+
+        // Settings like G90 or F run before the segments, a program stop (M0, M30, ...) after them.
+        String[] remainder = CoordinateRewriteGuard.splitProgramStops(sc.remainder);
+        if (!remainder[0].isEmpty()) {
+            results.add(remainder[0]);
+        }
 
         if (points.isEmpty()) {
+            if (!remainder[1].isEmpty()) {
+                results.add(remainder[1]);
+            }
             return results;
         }
 
@@ -115,7 +170,7 @@ public class ArcExpander implements CommandProcessor {
 
         if (convertToLines) {
             for (Position point : points) {
-                results.add(GcodePreprocessorUtils.generateLineFromPoints(G1, start, point, state.inAbsoluteMode, df));
+                results.add(GcodePreprocessorUtils.generateLineFromPoints(G1, start, point, arcMeta.state.inAbsoluteMode, df));
                 start = point;
             }
         } else {
@@ -123,7 +178,36 @@ public class ArcExpander implements CommandProcessor {
             throw new UnsupportedOperationException("I have not implemented this.");
         }
 
+        if (!remainder[1].isEmpty()) {
+            results.add(remainder[1]);
+        }
         return results;
+    }
+
+    /**
+     * Returns the arc line as it is. A line that continues the arc mode without its own G2/G3 word gets one: after an
+     * earlier arc was expanded into G1 lines the controller is no longer in arc mode.
+     */
+    private static List<String> passThrough(String command, Code arc) {
+        if (GcodePreprocessorUtils.getGCodes(GcodePreprocessorUtils.splitCommand(command)).contains(arc)) {
+            return Collections.singletonList(command);
+        }
+        return Collections.singletonList(arc + command);
+    }
+
+    /**
+     * @return the two axes of the plane and the axis across it
+     */
+    private static Axis[] planeAxes(Plane plane) {
+        switch (plane) {
+            case ZX:
+                return new Axis[]{Axis.Z, Axis.X, Axis.Y};
+            case YZ:
+                return new Axis[]{Axis.Y, Axis.Z, Axis.X};
+            case XY:
+            default:
+                return new Axis[]{Axis.X, Axis.Y, Axis.Z};
+        }
     }
 
     private static Code hasArcCommand(List<GcodeMeta> commands) {

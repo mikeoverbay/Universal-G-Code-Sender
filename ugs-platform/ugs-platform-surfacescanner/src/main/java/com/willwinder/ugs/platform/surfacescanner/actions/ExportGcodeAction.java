@@ -106,7 +106,7 @@ public class ExportGcodeAction extends AbstractAction implements UGSEventListene
             return;
         }
 
-        CommandProcessorList commandProcessor = createCommandProcessor(backend.getSettings().getAutoLevelSettings(), surfaceScanner);
+        CommandProcessorList commandProcessor = createCommandProcessor(backend.getSettings().getAutoLevelSettings(), surfaceScanner, backend.getSettings().getPreferredUnits());
         File gcodeFile = backend.getGcodeFile();
         GcodeParser gcp = new GcodeParser();
         gcp.addCommandProcessor(commandProcessor);

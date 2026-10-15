@@ -84,25 +84,33 @@ public class Utils {
         return new Position(x, y, z, position.getUnits());
     }
 
-    public static CommandProcessorList createCommandProcessor(AutoLevelSettings autoLevelSettings, SurfaceScanner surfaceScanner) {
+    /**
+     * @param preferredUnits the units the auto level settings (like the Z surface) are shown in
+     */
+    public static CommandProcessorList createCommandProcessor(AutoLevelSettings autoLevelSettings, SurfaceScanner surfaceScanner, UnitUtils.Units preferredUnits) {
+        Position[][] grid = surfaceScanner.getProbePositionGrid();
+        if (grid.length < 2 || grid[0].length < 2) {
+            throw new IllegalArgumentException(MeshLeveler.ERROR_NOT_ENOUGH_SAMPLES);
+        }
+
         CommandProcessorList result = new CommandProcessorList();
 
-        // Step 1: Convert arcs to line segments.
-        result.add(new ArcExpander(true, autoLevelSettings.getAutoLevelArcSliceLength(), GcodePreprocessorUtils.getDecimalFormatter()));
+        // Step 1: Convert arcs to line segments, only from known positions since they are leveled afterwards.
+        result.add(new ArcExpander(true, autoLevelSettings.getAutoLevelArcSliceLength(), GcodePreprocessorUtils.getDecimalFormatter(), true));
 
-		double stepResX = (autoLevelSettings.getMaxX() - autoLevelSettings.getMinX()) /
-						  Math.max(1, autoLevelSettings.getXSampleCount() - 1);
-		double stepResY = (autoLevelSettings.getMaxY() - autoLevelSettings.getMinY()) /
-						  Math.max(1, autoLevelSettings.getYSampleCount() - 1);
+        // Step 2: Line splitter. No line should be longer than a fraction of the probe spacing, measured on the
+        // probe grid in its own units (the program may be in other units).
+		double stepResX = grid[1][0].x - grid[0][0].x;
+		double stepResY = grid[0][1].y - grid[0][0].y;
 		double avgRes = (stepResX + stepResY) / 2.0;
+		if (avgRes > 0) {
+			result.add(new LineSplitter(avgRes / 4, grid[0][0].getUnits()));
+		}
 
-		result.add(new LineSplitter(avgRes / 4));
-
-
-        // Step 3: Adjust Z heights codes based on mesh offsets.
-        result.add(
-                new MeshLeveler(autoLevelSettings.getZSurface(),
-                        surfaceScanner.getProbePositionGrid()));
+        // Step 3: Adjust Z heights codes based on mesh offsets. The Z surface is entered in the preferred units,
+        // the MeshLeveler takes it in mm.
+        double zSurfaceMM = autoLevelSettings.getZSurface() * UnitUtils.scaleUnits(preferredUnits, UnitUtils.Units.MM);
+        result.add(new MeshLeveler(zSurfaceMM, grid));
         return result;
     }
 	public static String extractMetadataValue(String line, String key) {

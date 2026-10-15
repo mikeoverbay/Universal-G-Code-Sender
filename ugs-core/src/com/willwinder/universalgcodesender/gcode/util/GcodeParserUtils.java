@@ -25,6 +25,7 @@ import com.willwinder.universalgcodesender.gcode.GcodePreprocessorUtils;
 import com.willwinder.universalgcodesender.gcode.GcodeState;
 import static com.willwinder.universalgcodesender.gcode.util.Code.G20;
 import static com.willwinder.universalgcodesender.gcode.util.Code.G21;
+import static com.willwinder.universalgcodesender.gcode.util.Code.G53;
 import static com.willwinder.universalgcodesender.gcode.util.Code.G90;
 import static com.willwinder.universalgcodesender.gcode.util.Code.G90_1;
 import static com.willwinder.universalgcodesender.gcode.util.Code.G91;
@@ -32,6 +33,7 @@ import static com.willwinder.universalgcodesender.gcode.util.Code.G91_1;
 import static com.willwinder.universalgcodesender.gcode.util.Code.ModalGroup.Motion;
 import static com.willwinder.universalgcodesender.gcode.util.Code.UNKNOWN;
 import com.willwinder.universalgcodesender.i18n.Localization;
+import com.willwinder.universalgcodesender.model.Axis;
 import com.willwinder.universalgcodesender.model.Position;
 import com.willwinder.universalgcodesender.model.UnitUtils;
 import com.willwinder.universalgcodesender.types.GcodeCommand;
@@ -51,6 +53,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Set;
 import java.util.logging.Level;
@@ -62,6 +66,7 @@ import java.util.stream.Collectors;
  */
 public class GcodeParserUtils {
     private static final Logger LOGGER = Logger.getLogger(GcodeParserUtils.class.getName());
+    private static final Set<Axis> XYZ = Collections.unmodifiableSet(EnumSet.of(Axis.X, Axis.Y, Axis.Z));
 
     /**
      * For backwards compatibility this method calls processCommand with includeNonMotionStates = false.
@@ -143,13 +148,26 @@ public class GcodeParserUtils {
             gCodes.add(state.currentMotionMode);
         }
 
+        // With G53 the axis words of the G0/G1 on this line are machine coordinates.
+        boolean machineCoordinates = gCodes.contains(G53);
+
+        // A tool change runs before the motion on its line and can leave the spindle anywhere.
+        if (hasMCode(args, 6)) {
+            state.unknownAxes.addAll(XYZ);
+        }
+
+        // Apply modal settings (units, plane, distance mode, G53, ...) before the codes that use the axis words,
+        // whatever the order of the words on the line: "G1 X5 G91" is a relative move. The sort is stable.
+        List<Code> orderedCodes = new ArrayList<>(gCodes);
+        orderedCodes.sort(Comparator.comparing(Code::consumesMotion));
+
         // Apply each code to the state.
         List<GcodeParser.GcodeMeta> results = new ArrayList<>();
-        for (Code i : gCodes) {
+        for (Code i : orderedCodes) {
             if (i == UNKNOWN) {
                 LOGGER.warning("An unknown gcode command was detected in: " + command);
             } else {
-                GcodeParser.GcodeMeta meta = handleGCode(i, args, line, state);
+                GcodeParser.GcodeMeta meta = handleGCode(i, args, line, state, machineCoordinates);
                 meta.command = command;
                 // Commands like 'G21' don't return a point segment.
                 if (meta.point != null) {
@@ -159,6 +177,13 @@ public class GcodeParserUtils {
                 results.add(meta);
             }
         }
+
+        // A program pause runs after the motion on its line. The operator may jog before resuming.
+        if (mCodes.contains(Code.M0) || mCodes.contains(Code.M1) || mCodes.contains(Code.M60)) {
+            state.unknownAxes.addAll(XYZ);
+            results.forEach(meta -> meta.state.unknownAxes.addAll(XYZ));
+        }
+
         // Return updated state / command.
         if (results.isEmpty() && includeNonMotionStates) {
             GcodeParser.GcodeMeta meta = new GcodeParser.GcodeMeta();
@@ -250,12 +275,14 @@ public class GcodeParserUtils {
      * <p>
      * A copy of the state object should go in the resulting GcodeMeta object.
      */
-    private static GcodeParser.GcodeMeta handleGCode(final Code code, List<String> args, int line, GcodeState state)
+    private static GcodeParser.GcodeMeta handleGCode(final Code code, List<String> args, int line, GcodeState state,
+                                                     boolean machineCoordinates)
             throws GcodeParserException {
         GcodeParser.GcodeMeta meta = new GcodeParser.GcodeMeta();
 
         meta.code = code;
 
+        Position previousPoint = state.currentPoint;
         Position nextPoint = null;
 
         // If it is a movement code make sure it has some coordinates.
@@ -277,17 +304,73 @@ public class GcodeParserUtils {
         switch (code) {
             case G0:
                 meta.point = addLinearPointSegment(nextPoint, true, line, state);
+                updateKnownAxes(args, state, machineCoordinates, previousPoint);
                 break;
             case G1:
                 meta.point = addLinearPointSegment(nextPoint, false, line, state);
+                updateKnownAxes(args, state, machineCoordinates, previousPoint);
                 break;
 
             // Arc command.
             case G2:
                 meta.point = addArcPointSegment(nextPoint, true, args, line, state);
+                updateKnownAxes(args, state, machineCoordinates, previousPoint);
                 break;
             case G3:
                 meta.point = addArcPointSegment(nextPoint, false, args, line, state);
+                updateKnownAxes(args, state, machineCoordinates, previousPoint);
+                break;
+
+            // Canned cycles (also their modal repeats, like a line with only "X3 Y3") and spindle synchronized
+            // motion are not modelled, so the position after them is unknown.
+            case G33:
+            case G73:
+            case G76:
+            case G81:
+            case G82:
+            case G83:
+            case G84:
+            case G85:
+            case G86:
+            case G87:
+            case G88:
+            case G89:
+                state.unknownAxes.addAll(XYZ);
+                break;
+
+            // Go to a stored position. Only the named axes move, or all axes if none are named.
+            case G28:
+            case G28_2:
+            case G28_3:
+            case G30: {
+                EnumSet<Axis> axes = axisWords(args);
+                state.unknownAxes.addAll(axes.isEmpty() ? EnumSet.allOf(Axis.class) : axes);
+                break;
+            }
+
+            // The work coordinate frame of the named axes changes.
+            case G10:
+                if (changesActiveWorkOffset(args, state)) {
+                    state.unknownAxes.addAll(axisWords(args));
+                    state.workFrameChanged = true;
+                }
+                break;
+            case G92:
+                state.unknownAxes.addAll(axisWords(args));
+                state.workFrameChanged = true;
+                break;
+            case G92_1:
+            case G92_2:
+            case G92_3:
+                state.unknownAxes.addAll(EnumSet.allOf(Axis.class));
+                state.workFrameChanged = true;
+                break;
+
+            // Tool length offset changes the Z frame.
+            case G43:
+            case G43_1:
+            case G49:
+                state.unknownAxes.add(Axis.Z);
                 break;
 
             case G17:
@@ -318,6 +401,8 @@ public class GcodeParserUtils {
             case G38_4: // probe away from workpiece, stop on loss of contact, signal error if failure
             case G38_5: // probe away from workpiece, stop on loss of contact
                 meta.point = addProbePointSegment(nextPoint, true, line, state);
+                // The probe stops at an unknown contact point, not at the target.
+                state.unknownAxes.addAll(axisWords(args));
                 break;
 
             // These are not used in the visualizer.
@@ -330,6 +415,13 @@ public class GcodeParserUtils {
             case G59_1:
             case G59_2:
             case G59_3:
+                if (state.offset != code) {
+                    state.unknownAxes.addAll(EnumSet.allOf(Axis.class));
+                    // Selecting the work coordinate system before the first move is not a change of frame
+                    if (state.motionStarted) {
+                        state.workFrameChanged = true;
+                    }
+                }
                 state.offset = code;
                 break;
 
@@ -364,6 +456,72 @@ public class GcodeParserUtils {
         }
         meta.state = state.copy();
         return meta;
+    }
+
+    /**
+     * Axis words on a G0/G1/G2/G3 line in absolute mode make those axes known again. With G53 they are machine
+     * coordinates, so the axes become unknown. A relative move leaves them as they were, except that a relative
+     * move from a position that was never set stays unknown (the parser would otherwise start it from zero).
+     */
+    private static void updateKnownAxes(List<String> args, GcodeState state, boolean machineCoordinates,
+                                        Position previousPoint) {
+        EnumSet<Axis> axes = axisWords(args);
+        // A move in machine coordinates (a G53 retract in the program header) is not motion in a work frame
+        if (!machineCoordinates && !axes.isEmpty()) {
+            state.motionStarted = true;
+        }
+        if (machineCoordinates) {
+            state.unknownAxes.addAll(axes);
+        } else if (state.inAbsoluteMode) {
+            state.unknownAxes.removeAll(axes);
+        } else {
+            for (Axis axis : axes) {
+                if (previousPoint == null || Double.isNaN(previousPoint.get(axis))) {
+                    state.unknownAxes.add(axis);
+                }
+            }
+        }
+    }
+
+    /**
+     * G10 L2/L20 sets the offsets of the work coordinate system given by P (P0 is the active one, P1 is G54 ...
+     * P9 is G59.3). Other G10 forms (L1, L10, L11) change the tool table, which doesn't move the active frame.
+     */
+    private static boolean changesActiveWorkOffset(List<String> args, GcodeState state) {
+        double l = GcodePreprocessorUtils.parseCoord(args, 'L');
+        if (l != 2 && l != 20) {
+            return false;
+        }
+        double p = GcodePreprocessorUtils.parseCoord(args, 'P');
+        if (Double.isNaN(p) || p == 0) {
+            return true;
+        }
+        Code[] systems = {Code.G54, Code.G55, Code.G56, Code.G57, Code.G58, Code.G59, Code.G59_1, Code.G59_2, Code.G59_3};
+        int index = (int) p - 1;
+        return index < 0 || index >= systems.length || systems[index] == state.offset;
+    }
+
+    private static boolean hasMCode(List<String> args, int code) {
+        for (String value : GcodePreprocessorUtils.parseCodes(args, 'M')) {
+            try {
+                if (Double.parseDouble(value) == code) {
+                    return true;
+                }
+            } catch (NumberFormatException e) {
+                // Not a number, not this code
+            }
+        }
+        return false;
+    }
+
+    private static EnumSet<Axis> axisWords(List<String> args) {
+        EnumSet<Axis> axes = EnumSet.noneOf(Axis.class);
+        for (Axis axis : Axis.values()) {
+            if (!Double.isNaN(GcodePreprocessorUtils.parseCoord(args, axis.name().charAt(0)))) {
+                axes.add(axis);
+            }
+        }
+        return axes;
     }
 
     /**

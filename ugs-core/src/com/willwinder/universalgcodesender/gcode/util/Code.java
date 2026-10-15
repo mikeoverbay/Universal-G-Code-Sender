@@ -104,7 +104,10 @@ public enum Code {
     G42_1(Cutter),
 
     G43(TLO),
-    G43_1(TLO),
+    /**
+     * GRBL dynamic tool length offset. Its Z word is the offset value, not a move target.
+     */
+    G43_1(TLO, true, true),
     G49(TLO),
 
     G98(CannedCycle),
@@ -203,6 +206,38 @@ public enum Code {
 
     public boolean motionOptional() {
         return this.motionOptional;
+    }
+
+    /**
+     * @return true for codes whose axis words are not a target in the active work coordinate system (G53, G28, G30,
+     * G38.x), or which change that system or the tool length offset (G10, G92, G43, G43.1, G49).
+     * Processors that rewrite coordinates must pass a line containing one of them through unchanged. A work
+     * coordinate system code (G54-G59.3) only matters if it differs from the active one, which needs the state.
+     */
+    public boolean isNonWorkCoordinateCode() {
+        switch (this) {
+            case G10:
+            case G28:
+            case G28_1:
+            case G28_2:
+            case G28_3:
+            case G30:
+            case G38_2:
+            case G38_3:
+            case G38_4:
+            case G38_5:
+            case G43:
+            case G43_1:
+            case G49:
+            case G53:
+            case G92:
+            case G92_1:
+            case G92_2:
+            case G92_3:
+                return true;
+            default:
+                return false;
+        }
     }
 
     /**

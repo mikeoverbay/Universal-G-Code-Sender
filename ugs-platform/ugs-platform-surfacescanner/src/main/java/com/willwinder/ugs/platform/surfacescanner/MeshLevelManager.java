@@ -48,7 +48,7 @@ public class MeshLevelManager {
                 return;
             }
 
-            commandProcessorList = createCommandProcessor(autoLevelSettings, surfaceScanner);
+            commandProcessorList = createCommandProcessor(autoLevelSettings, surfaceScanner, backend.getSettings().getPreferredUnits());
             backend.applyCommandProcessor(commandProcessorList);
         } catch (Exception ex) {
             GUIHelpers.displayErrorDialog(ex.getMessage());

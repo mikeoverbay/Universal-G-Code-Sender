@@ -18,10 +18,10 @@
  */
 package com.willwinder.universalgcodesender.gcode.processors;
 
-import com.google.common.collect.ImmutableList;
 import com.willwinder.universalgcodesender.gcode.GcodeParser.GcodeMeta;
 import com.willwinder.universalgcodesender.gcode.GcodePreprocessorUtils;
 import com.willwinder.universalgcodesender.gcode.GcodeState;
+import com.willwinder.universalgcodesender.gcode.util.Code;
 import com.willwinder.universalgcodesender.gcode.util.GcodeParserException;
 import com.willwinder.universalgcodesender.gcode.util.GcodeParserUtils;
 import com.willwinder.universalgcodesender.model.PartialPosition;
@@ -31,6 +31,7 @@ import com.willwinder.universalgcodesender.model.UnitUtils.Units;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.stream.Collectors;
 
 /**
  * Adjust Z heights based on a provided surface mesh.
@@ -49,8 +50,9 @@ public class MeshLeveler implements CommandProcessor {
     final private double materialSurfaceHeightMM;
     final private Position[][] surfaceMesh;
     final private Position lowerLeft;
+    final private Position upperRight;
     final private int xLen, yLen;
-    final private double resolution;
+    final private double xResolution, yResolution;
     private Units surfaceMeshUnits;
 
     /**
@@ -69,11 +71,11 @@ public class MeshLeveler implements CommandProcessor {
         validateMesh(surfaceMesh);
         this.surfaceMesh = surfaceMesh;
         this.surfaceMeshUnits = surfaceMesh[0][0].getUnits();
-        this.resolution = Math.max(
-                surfaceMesh[1][0].x - surfaceMesh[0][0].x,
-                surfaceMesh[0][1].y - surfaceMesh[0][0].y);
+        this.xResolution = surfaceMesh[1][0].x - surfaceMesh[0][0].x;
+        this.yResolution = surfaceMesh[0][1].y - surfaceMesh[0][0].y;
 
         this.lowerLeft = surfaceMesh[0][0];
+        this.upperRight = surfaceMesh[xLen - 1][yLen - 1];
     }
 
     private void validateMesh(Position[][] surfaceMesh) {
@@ -145,66 +147,110 @@ public class MeshLeveler implements CommandProcessor {
     public List<String> processCommand(final String commandString, GcodeState state) throws GcodeParserException {
         List<GcodeMeta> commands = GcodeParserUtils.processCommand(commandString, 0, state);
 
+        if (commands == null) {
+            return Collections.singletonList(commandString);
+        }
+
+        // A move in machine coordinates (G53), a line that goes home, probes or changes the work coordinate
+        // frame or tool offset, or that moves a rotary axis, is passed through untouched: a work-coordinate surface
+        // offset does not apply to it. The ArcExpander leaves such arcs, and arcs that start at an unknown
+        // position, unexpanded; they cannot be leveled either.
+        boolean isArc = commands.stream().anyMatch(c -> c.code == Code.G2 || c.code == Code.G3);
+        if (CoordinateRewriteGuard.mustPassThrough(commandString, commands, state)
+                || (isArc && !state.isPositionKnownXYZ())) {
+            return Collections.singletonList(commandString);
+        }
+
+        // The mesh was scanned in the work coordinate frame the program started in. After G92, G10 or a switch to
+        // another work coordinate system the rest of the program is not leveled.
+        if (state.workFrameChanged) {
+            return Collections.singletonList(commandString);
+        }
+
         // If there are no lines, return unmodified input.
         if (!ensureJustLines(commands)) {
             return Collections.singletonList(commandString);
         }
 
-        ImmutableList.Builder<String> adjustedCommands = ImmutableList.builder();
-        for (GcodeMeta command : commands) {
-            if (command == null) {
-                throw new GcodeParserException(ERROR_MISSING_POINT_DATA + commandString);
-            }
-            if (command.point == null) {
-                adjustedCommands.add(commandString);
-                continue;
-            }
-
-            Position start = state.currentPoint;
-            Position end = command.point.point();
-
-            // Get offset relative to the expected surface height.
-            // Visualizer normalizes everything to MM but probe mesh might be INCH
-            double zPointOffset;
-            if (state.inAbsoluteMode) {
-                Position position = end.getPositionIn(surfaceMeshUnits);
-                double materialSurfaceHeight = this.materialSurfaceHeightMM * UnitUtils.scaleUnits(Units.MM, surfaceMeshUnits);
-                zPointOffset = (surfaceHeightAt(position.x, position.y) - materialSurfaceHeight) * UnitUtils.scaleUnits(surfaceMeshUnits, end.getUnits());
-            } else {
-                // TODO: If the first move in the gcode file is relative it won't properly take the materialSurfaceHeight
-                // into account. To fix the CommandProcessor needs to inject an adjustment before that first relative move
-                // happens. Until that happens the user must make sure the materialSurfaceHeight is zero.
-
-                // In relative mode we only need to adjust by the z delta between the starting and ending point
-                Position startPositionInMeshUnits = start.getPositionIn(surfaceMeshUnits);
-                double startHeight = surfaceHeightAt(startPositionInMeshUnits.x, startPositionInMeshUnits.y);
-                Position endPositionInMeshUnits = end.getPositionIn(surfaceMeshUnits);
-                double endHeight = surfaceHeightAt(endPositionInMeshUnits.x, endPositionInMeshUnits.y);
-                zPointOffset = (endHeight - startHeight) * UnitUtils.scaleUnits(surfaceMeshUnits, end.getUnits());
-            }
-
-            // Update z coordinate.
-            double newZ = end.getZ() + zPointOffset;
-
-            PartialPosition.Builder overrideZ = PartialPosition.builder(end.getUnits());
-            if (command.state.inAbsoluteMode) {
-                overrideZ.setZ(newZ);
-            } else {
-                overrideZ.setZ(newZ - start.getZ());
-            }
-            String adjustedCommand = GcodePreprocessorUtils.overridePosition(commandString, overrideZ.build());
-            adjustedCommands.add(adjustedCommand);
+        // Other G-codes on the line (G90, G17, ...) have their own meta without a point. Only the G0/G1 meta is
+        // adjusted and the line is emitted once.
+        GcodeMeta command = commands.stream()
+                .filter(c -> c.code == Code.G0 || c.code == Code.G1)
+                .findFirst()
+                .orElse(null);
+        if (command == null) {
+            throw new GcodeParserException(ERROR_MISSING_POINT_DATA + commandString);
+        }
+        if (command.point == null) {
+            // G0/G1 without axis words, for example "G1 F100"
+            return Collections.singletonList(commandString);
         }
 
-        return adjustedCommands.build();
+        // Use the distance mode that applies to this move, including a G90/G91 on the same line.
+        boolean absolute = command.state.inAbsoluteMode;
+
+        // Leave the move untouched if its end (or for a relative move, its start) is not a known work position:
+        // the first moves of a program, and moves after G53, G28/G30, G38.x, G92, G10, G43.1 or a change of work
+        // coordinate system. Leveling it would add a Z word calculated from a guessed position.
+        if (command.state.workFrameChanged || !command.state.isPositionKnownXYZ()
+                || (!absolute && !state.isPositionKnownXYZ())) {
+            return Collections.singletonList(commandString);
+        }
+
+        Position start = state.currentPoint;
+        Position end = command.point.point();
+
+        // Get offset relative to the expected surface height.
+        // Visualizer normalizes everything to MM but probe mesh might be INCH
+        double zPointOffset;
+        if (absolute) {
+            Position position = end.getPositionIn(surfaceMeshUnits);
+            double materialSurfaceHeight = this.materialSurfaceHeightMM * UnitUtils.scaleUnits(Units.MM, surfaceMeshUnits);
+            zPointOffset = (surfaceHeightAt(position.x, position.y) - materialSurfaceHeight) * UnitUtils.scaleUnits(surfaceMeshUnits, end.getUnits());
+        } else {
+            // TODO: If the first move in the gcode file is relative it won't properly take the materialSurfaceHeight
+            // into account. To fix the CommandProcessor needs to inject an adjustment before that first relative move
+            // happens. Until that happens the user must make sure the materialSurfaceHeight is zero.
+
+            // In relative mode we only need to adjust by the z delta between the starting and ending point
+            Position startPositionInMeshUnits = start.getPositionIn(surfaceMeshUnits);
+            double startHeight = surfaceHeightAt(startPositionInMeshUnits.x, startPositionInMeshUnits.y);
+            Position endPositionInMeshUnits = end.getPositionIn(surfaceMeshUnits);
+            double endHeight = surfaceHeightAt(endPositionInMeshUnits.x, endPositionInMeshUnits.y);
+            zPointOffset = (endHeight - startHeight) * UnitUtils.scaleUnits(surfaceMeshUnits, end.getUnits());
+        }
+
+        // Update z coordinate.
+        double newZ = end.getZ() + zPointOffset;
+
+        PartialPosition.Builder overrideZ = PartialPosition.builder(end.getUnits());
+        if (absolute) {
+            overrideZ.setZ(newZ);
+        } else {
+            overrideZ.setZ(newZ - start.getPositionIn(end.getUnits()).getZ());
+        }
+
+        return Collections.singletonList(GcodePreprocessorUtils.overridePosition(withoutComments(commandString), overrideZ.build()));
+    }
+
+    /**
+     * Removes comments so a Z inside a comment is not rewritten and the new Z is not appended inside a ';' comment.
+     */
+    private static String withoutComments(String command) {
+        if (command.indexOf('(') < 0 && command.indexOf(';') < 0) {
+            return command;
+        }
+        return GcodePreprocessorUtils.splitCommand(command).stream()
+                .filter(word -> !word.startsWith("(") && !word.startsWith(";"))
+                .collect(Collectors.joining());
     }
 
     protected Position[][] findBoundingArea(double x, double y) {
         double xOffset = x - this.lowerLeft.x;
         double yOffset = y - this.lowerLeft.y;
 
-        int xIdx = (int) ((xOffset == 0) ? 0 : (xOffset / this.resolution));
-        int yIdx = (int) ((yOffset == 0) ? 0 : (yOffset / this.resolution));
+        int xIdx = (int) ((xOffset == 0) ? 0 : (xOffset / this.xResolution));
+        int yIdx = (int) ((yOffset == 0) ? 0 : (yOffset / this.yResolution));
 
         // Clamp bounds
         xIdx = Math.min(xIdx, this.xLen - 2);
@@ -225,6 +271,10 @@ public class MeshLeveler implements CommandProcessor {
      * http://supercomputingblog.com/graphics/coding-bilinear-interpolation/
      */
     protected double surfaceHeightAt(double x, double y) {
+        // Outside the probed area use the height at the nearest edge instead of extrapolating the edge slope.
+        x = Math.max(this.lowerLeft.x, Math.min(x, this.upperRight.x));
+        y = Math.max(this.lowerLeft.y, Math.min(y, this.upperRight.y));
+
         Position[][] q = findBoundingArea(x, y);
 
         Position Q11 = q[0][0];

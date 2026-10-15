@@ -188,7 +188,8 @@ public class MeshLevelerTest {
         state.currentPoint = new Position(0, 0, 0, MM);
         state.inAbsoluteMode = true;
 
-        sendCommandExpectResult(ml, state, "G1X1G20", "G1X1G20Z0", "G1X1G20");
+        // The line is emitted once, the G20 on it doesn't add an unleveled copy
+        sendCommandExpectResult(ml, state, "G1X1G20", "G1X1G20Z0");
     }
 
     @Test

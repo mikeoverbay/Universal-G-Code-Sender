@@ -20,9 +20,12 @@ package com.willwinder.universalgcodesender.gcode;
 
 import com.willwinder.universalgcodesender.gcode.util.Code;
 import com.willwinder.universalgcodesender.gcode.util.Plane;
+import com.willwinder.universalgcodesender.model.Axis;
 import com.willwinder.universalgcodesender.model.Position;
 import com.willwinder.universalgcodesender.model.UnitUtils;
 import com.willwinder.universalgcodesender.model.UnitUtils.Units;
+
+import java.util.EnumSet;
 
 import static com.willwinder.universalgcodesender.gcode.util.Code.*;
 
@@ -70,6 +73,29 @@ public class GcodeState {
     public Position currentPoint = null;
     public int commandNumber = 0;
 
+    /**
+     * Axes whose position in the active work coordinate system is not known, even though {@link #currentPoint}
+     * may hold a value for them. Set by motion in machine coordinates (G53), go-home (G28/G30), probing (G38.x),
+     * canned cycles, coordinate frame changes (G92, G10, switching G54-G59.3), tool length offset changes
+     * (G43, G43.1, G49), tool changes (M6), program pauses (M0, M1, M60) and relative moves from an unknown position.
+     * An axis is known again after the next absolute (G90) work-coordinate move that names it.
+     * currentPoint is left as it was so the visualizer is unchanged; processors that rewrite coordinates must use
+     * {@link #isPositionKnown(Axis)}.
+     */
+    public EnumSet<Axis> unknownAxes = EnumSet.noneOf(Axis.class);
+
+    /**
+     * True once the program has moved (G0-G3). Used to tell a program selecting its work coordinate system
+     * from a program switching to another one.
+     */
+    public boolean motionStarted = false;
+
+    /**
+     * True after the program changed its work coordinate frame: G92, G92.x, G10, or a switch to another work
+     * coordinate system after motion has started. Positions after this are in a different frame than before.
+     */
+    public boolean workFrameChanged = false;
+
     public GcodeState() {
         // GRBL initial state: [G0 G54 G17 G21 G90 G94 M0 M5 M9 T0 F0. S0.]
         this.currentMotionMode = G0;
@@ -112,7 +138,24 @@ public class GcodeState {
             ret.currentPoint = new Position(currentPoint.x, currentPoint.y, currentPoint.z, currentPoint.a, currentPoint.b, currentPoint.c, getUnits());
         }
         ret.commandNumber = commandNumber;
+        ret.unknownAxes = EnumSet.copyOf(unknownAxes);
+        ret.motionStarted = motionStarted;
+        ret.workFrameChanged = workFrameChanged;
         return ret;
+    }
+
+    /**
+     * @return true if the position of the axis in the active work coordinate system is known
+     */
+    public boolean isPositionKnown(Axis axis) {
+        return currentPoint != null && !Double.isNaN(currentPoint.get(axis)) && !unknownAxes.contains(axis);
+    }
+
+    /**
+     * @return true if the X, Y and Z positions in the active work coordinate system are known
+     */
+    public boolean isPositionKnownXYZ() {
+        return isPositionKnown(Axis.X) && isPositionKnown(Axis.Y) && isPositionKnown(Axis.Z);
     }
 
     /**

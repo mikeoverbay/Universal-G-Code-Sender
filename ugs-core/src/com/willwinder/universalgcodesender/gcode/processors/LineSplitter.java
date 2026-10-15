@@ -18,7 +18,6 @@
  */
 package com.willwinder.universalgcodesender.gcode.processors;
 
-import com.google.common.collect.Iterables;
 import com.willwinder.universalgcodesender.gcode.GcodeParser;
 import com.willwinder.universalgcodesender.gcode.GcodeParser.GcodeMeta;
 import com.willwinder.universalgcodesender.gcode.GcodePreprocessorUtils;
@@ -29,6 +28,8 @@ import static com.willwinder.universalgcodesender.gcode.util.Code.*;
 import com.willwinder.universalgcodesender.gcode.util.GcodeParserException;
 import com.willwinder.universalgcodesender.gcode.util.GcodeParserUtils;
 import com.willwinder.universalgcodesender.model.Position;
+import com.willwinder.universalgcodesender.model.UnitUtils;
+import com.willwinder.universalgcodesender.model.UnitUtils.Units;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -40,12 +41,22 @@ import java.util.List;
  */
 public class LineSplitter implements CommandProcessor {
     final double maxSegmentLength;
+    private final Units segmentLengthUnits;
+
+    /**
+     * @param segmentLength length of longest single line, in the units of the program.
+     */
+    public LineSplitter(double segmentLength) {
+        this(segmentLength, null);
+    }
 
     /**
      * @param segmentLength length of longest single line.
+     * @param units         the units of segmentLength, or null for the units of the program.
      */
-    public LineSplitter(double segmentLength) {
+    public LineSplitter(double segmentLength, Units units) {
         this.maxSegmentLength = segmentLength;
+        this.segmentLengthUnits = units;
     }
 
     @Override
@@ -70,59 +81,83 @@ public class LineSplitter implements CommandProcessor {
     public List<String> processCommand(String commandString, GcodeState state) throws GcodeParserException {
         List<GcodeParser.GcodeMeta> commands = GcodeParserUtils.processCommand(commandString, 0, state);
 
-        List<String> results = new ArrayList<>();
-
         Code code = hasLine(commands);
         if (code == null) {
             return Collections.singletonList(commandString);
         }
 
-        SplitCommand sc = GcodePreprocessorUtils.extractMotion(code, commandString);
-        if (sc.remainder.length() > 0) {
-            results.add(sc.remainder);
+        // Never rewrite a move in machine coordinates (G53) or a line that goes home, probes or changes the work
+        // coordinate frame or tool offset: the generated segments would be plain work-coordinate moves.
+        if (CoordinateRewriteGuard.mustPassThrough(commandString, commands, state)) {
+            return Collections.singletonList(commandString);
         }
 
-        GcodeMeta command = Iterables.getLast(commands);
-
-        if (command == null) {
-            throw new GcodeParserException("Internal parser error: missing data. " + commandString);
-        }
+        GcodeMeta command = commands.stream()
+                .filter(c -> c.code == code)
+                .findFirst()
+                .orElseThrow(() -> new GcodeParserException("Internal parser error: missing data. " + commandString));
         if (command.point == null) {
             // No point data associated with this command (Maybe just setting feed rate), leave it as-is
             return Collections.singletonList(commandString);
         }
 
-        // line length
-        Position start = state.currentPoint;
-        Position end = command.point.point();
-        Position current = start;
-        double length = start.distanceXYZ(end);
-
-        // Check if line needs splitting.
-        if (length > this.maxSegmentLength) {
-            int numSegments = (int) Math.ceil(length/this.maxSegmentLength);
-            double segmentLength = length / Math.ceil(length / this.maxSegmentLength);
-
-            // Create line segments, stop before the last one which uses the end point.
-            for (int i = 1; i < numSegments; i++) {
-                double k = 1 / (length / (i * segmentLength));
-                double newX = start.x + k * (end.x - start.x);
-                double newY = start.y + k * (end.y - start.y);
-                double newZ = start.z + k * (end.z - start.z);
-
-                Position next = new Position(newX, newY, newZ, start.getUnits());
-                results.add(GcodePreprocessorUtils.generateLineFromPoints(
-                        command.code, current, next, command.state.inAbsoluteMode, null));
-                current = next;
-            }
-
-            // Add the last line point.
-            results.add(GcodePreprocessorUtils.generateLineFromPoints(
-                    command.code, current, end, command.state.inAbsoluteMode, null));
-        } else {
+        // Absolute segments are only written when both ends are known positions in the work coordinate system.
+        // Otherwise every segment would get X, Y and Z words calculated from a guessed position (first move of the
+        // program, or after G53/G28/G30/G38.x/G92/G10/G43.1/M6/M0 or a change of work coordinate system).
+        // Relative segments only depend on the distance moved, so they can be written from any start.
+        if (command.state.inAbsoluteMode && (!state.isPositionKnownXYZ() || !command.state.isPositionKnownXYZ())) {
             return Collections.singletonList(commandString);
         }
 
+        // line length
+        Position end = command.point.point();
+        Position start = state.currentPoint.getPositionIn(end.getUnits());
+        Position current = start;
+        double length = start.distanceXYZ(end);
+        double maxLength = segmentLengthUnits == null
+                ? this.maxSegmentLength
+                : this.maxSegmentLength * UnitUtils.scaleUnits(segmentLengthUnits, end.getUnits());
+
+        // Check if line needs splitting. The length is not a number when an axis was never set.
+        if (!(maxLength > 0) || !(length > maxLength)) {
+            return Collections.singletonList(commandString);
+        }
+
+        SplitCommand sc = GcodePreprocessorUtils.extractMotion(code, commandString);
+        if (sc == null) {
+            return Collections.singletonList(commandString);
+        }
+
+        // Settings like G90 or F run before the segments, a program stop (M0, M30, ...) after them.
+        String[] remainder = CoordinateRewriteGuard.splitProgramStops(sc.remainder);
+        List<String> results = new ArrayList<>();
+        if (!remainder[0].isEmpty()) {
+            results.add(remainder[0]);
+        }
+
+        int numSegments = (int) Math.ceil(length / maxLength);
+        double segmentLength = length / Math.ceil(length / maxLength);
+
+        // Create line segments, stop before the last one which uses the end point.
+        for (int i = 1; i < numSegments; i++) {
+            double k = 1 / (length / (i * segmentLength));
+            double newX = start.x + k * (end.x - start.x);
+            double newY = start.y + k * (end.y - start.y);
+            double newZ = start.z + k * (end.z - start.z);
+
+            Position next = new Position(newX, newY, newZ, start.getUnits());
+            results.add(GcodePreprocessorUtils.generateLineFromPoints(
+                    command.code, current, next, command.state.inAbsoluteMode, null));
+            current = next;
+        }
+
+        // Add the last line point.
+        results.add(GcodePreprocessorUtils.generateLineFromPoints(
+                command.code, current, end, command.state.inAbsoluteMode, null));
+
+        if (!remainder[1].isEmpty()) {
+            results.add(remainder[1]);
+        }
         return results;
     }
 }
