@@ -244,6 +244,8 @@ public class FluidNCController implements IController, ICommunicatorListener {
     public void jogMachine(PartialPosition distance, double feedRate) throws Exception {
         String commandString = GcodeUtils.generateMoveCommand("G91", feedRate, distance);
         GcodeCommand command = createCommand("$J=" + commandString);
+        // The units and distance mode in a jog command only apply to the jog, the device keeps its gcode state
+        command.setTemporaryParserModalChange(true);
         sendCommandImmediately(command);
     }
 
@@ -251,6 +253,8 @@ public class FluidNCController implements IController, ICommunicatorListener {
     public void jogMachineTo(PartialPosition position, double feedRate) throws Exception {
         String commandString = GcodeUtils.generateMoveToCommand("G90", position, feedRate);
         GcodeCommand command = createCommand("$J=" + commandString);
+        // The units and distance mode in a jog command only apply to the jog, the device keeps its gcode state
+        command.setTemporaryParserModalChange(true);
         sendCommandImmediately(command);
     }
 

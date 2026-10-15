@@ -8,6 +8,7 @@ import com.willwinder.universalgcodesender.listeners.ControllerState;
 import com.willwinder.universalgcodesender.listeners.ControllerStatus;
 import com.willwinder.universalgcodesender.listeners.ControllerStatusBuilder;
 import com.willwinder.universalgcodesender.listeners.MessageType;
+import com.willwinder.universalgcodesender.model.PartialPosition;
 import com.willwinder.universalgcodesender.model.Position;
 import com.willwinder.universalgcodesender.model.UnitUtils;
 import com.willwinder.universalgcodesender.services.MessageService;
@@ -244,6 +245,27 @@ public class FluidNCControllerTest {
         target.restoreParserModalState();
 
         assertEquals("G91", commandArgumentCaptor.getValue().getCommandString());
+    }
+
+    @Test
+    public void jogCommandsShouldNotChangeTheRestoredGcodeState() throws Exception {
+        target.updateParserModalState(new GcodeCommand("G90 G21"));
+
+        ArgumentCaptor<GcodeCommand> commandArgumentCaptor = ArgumentCaptor.forClass(GcodeCommand.class);
+        doNothing().when(communicator).queueCommand(commandArgumentCaptor.capture());
+        target.jogMachine(new PartialPosition(1.0, null, null, UnitUtils.Units.INCH), 100);
+        target.jogMachineTo(new PartialPosition(0.0, 0.0, UnitUtils.Units.INCH), 100);
+
+        // The units and distance mode in a jog only apply to the jog
+        List<GcodeCommand> jogCommands = commandArgumentCaptor.getAllValues();
+        assertEquals("$J=G20G91X1F100", jogCommands.get(0).getCommandString());
+        jogCommands.forEach(command -> {
+            assertTrue(command.isTemporaryParserModalChange());
+            target.updateParserModalState(command);
+        });
+
+        target.restoreParserModalState();
+        assertEquals("G90 G21", commandArgumentCaptor.getValue().getCommandString());
     }
 
     @Test
