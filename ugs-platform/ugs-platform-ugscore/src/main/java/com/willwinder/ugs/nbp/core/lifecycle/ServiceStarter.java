@@ -62,6 +62,8 @@ public class ServiceStarter implements Runnable {
         Lookup.getDefault().lookup(ConsoleNotificationService.class);
         logger.info("Loading FileFilterService...");
         Lookup.getDefault().lookup(FileFilterService.class);
+        logger.info("Loading InchUnitsOnConnectService...");
+        Lookup.getDefault().lookup(InchUnitsOnConnectService.class);
         logger.info("Services loaded!");
 
         logger.info("Setting UGP version title.");

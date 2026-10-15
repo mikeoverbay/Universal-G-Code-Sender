@@ -33,6 +33,8 @@ import com.willwinder.universalgcodesender.model.Position;
 import com.willwinder.universalgcodesender.model.UGSEvent;
 import com.willwinder.universalgcodesender.model.UnitUtils;
 import com.willwinder.universalgcodesender.model.UnitUtils.Units;
+import com.willwinder.universalgcodesender.model.events.CommandEvent;
+import com.willwinder.universalgcodesender.model.events.CommandEventType;
 import com.willwinder.universalgcodesender.model.events.ControllerStateEvent;
 import com.willwinder.universalgcodesender.model.events.ControllerStatusEvent;
 import com.willwinder.universalgcodesender.model.events.SettingChangedEvent;
@@ -214,6 +216,9 @@ public class MachineStatusPanel extends JPanel implements UGSEventListener, Axis
                 onControllerStatusReceived(backend.getController().getControllerStatus());
             }
             updateControls();
+        } else if (evt instanceof CommandEvent commandEvent && commandEvent.getCommandEventType() == CommandEventType.COMMAND_COMPLETE && commandEvent.getCommand().isGenerated()) {
+            // Commands like G20 change the gcode state without giving a new controller status while idle
+            updateGcodeStates();
         }
     }
 
@@ -279,6 +284,10 @@ public class MachineStatusPanel extends JPanel implements UGSEventListener, Axis
                 : (int) this.backend.getGcodeState().spindleSpeed;
         this.spindleSpeedValue.setText(Integer.toString(spindleSpeed));
 
+        updateGcodeStates();
+    }
+
+    private void updateGcodeStates() {
         GcodeState state = backend.getGcodeState();
         if (state == null) {
             gStatesLabel.setText("--");

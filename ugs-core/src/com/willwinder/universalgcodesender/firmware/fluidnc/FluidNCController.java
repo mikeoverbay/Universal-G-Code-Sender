@@ -92,6 +92,9 @@ public class FluidNCController implements IController, ICommunicatorListener {
 
     private static final Logger LOGGER = Logger.getLogger(FluidNCController.class.getSimpleName());
 
+    // How many times the units are sent per connection or reset if the device rejects them
+    private static final int MAX_INCH_UNITS_ATTEMPTS = 3;
+
     private final GcodeParser gcodeParser = new GcodeParser();
     private final Set<ControllerListener> listeners = Collections.synchronizedSet(new HashSet<>());
     private final BlockingDeque<GcodeCommand> activeCommands = new LinkedBlockingDeque<>();
@@ -112,6 +115,11 @@ public class FluidNCController implements IController, ICommunicatorListener {
     private String distanceModeCode;
     private String unitsCode;
     private boolean isInitialized = false;
+
+    // FluidNC boots and resets in millimeters (G21), set when it should be switched to inches (G20) once it reports idle
+    private volatile boolean isInchUnitsPending = false;
+    private GcodeCommand inchUnitsCommand;
+    private int inchUnitsAttempts = 0;
 
     public FluidNCController() {
         this(new GrblCommunicator());
@@ -361,6 +369,7 @@ public class FluidNCController implements IController, ICommunicatorListener {
     @Override
     public Boolean closeCommPort() throws Exception {
         isInitialized = false;
+        isInchUnitsPending = false;
         positionPollTimer.stop();
         connectionWatchTimer.stop();
         if (!isCommOpen() && getControllerStatus().getState() == ControllerState.DISCONNECTED) {
@@ -555,6 +564,10 @@ public class FluidNCController implements IController, ICommunicatorListener {
             setControllerState(ControllerState.IDLE);
 
             messageService.dispatchMessage(MessageType.INFO, String.format("*** Connected to %s\n", getFirmwareVersion()));
+
+            // The idle state above is forced and the device may still be in alarm, so the units are set once a status report says idle
+            inchUnitsAttempts = 0;
+            isInchUnitsPending = true;
             requestStatusReport();
             positionPollTimer.start();
             isInitialized = true;
@@ -732,6 +745,16 @@ public class FluidNCController implements IController, ICommunicatorListener {
 
     @Override
     public void rawResponseListener(String response) {
+        // The device has been reset (stop, reset button, reboot) and is back in its default state using millimeters.
+        // Checked first as the welcome string is added to the response of any command that was in flight. Messages
+        // like [MSG:...] and [FILE:...] can also match the welcome pattern, but the welcome never starts with "[".
+        if (isInitialized && !response.startsWith("[") && FluidNCUtils.isWelcomeResponse(response)) {
+            LOGGER.info("The controller has been reset, resetting the gcode state and restoring the units to inches...");
+            resetParserModalState();
+            inchUnitsAttempts = 0;
+            isInchUnitsPending = true;
+        }
+
         if (GrblUtils.isGrblStatusString(response)) {
             getActiveCommand().filter(command -> command instanceof GetStatusCommand || command.getCommandString().contains("?")).ifPresent(command -> {
                 activeCommands.removeFirst();
@@ -754,11 +777,17 @@ public class FluidNCController implements IController, ICommunicatorListener {
             setControllerState(controllerStatus.getState());
             listeners.forEach(l -> l.statusStringListener(controllerStatus));
             messageService.dispatchMessage(MessageType.VERBOSE, response + "\n");
+            sendInchUnitsIfIdle();
         } else if (getActiveCommand().isPresent()) {
             GcodeCommand command = getActiveCommand().get();
             if (command.isDone()) {
                 activeCommands.removeFirst();
                 updateParserModalState(command);
+
+                // The device rejects the units while jogging, which could have been started at the same time, try again when idle
+                if (command == inchUnitsCommand && command.isError() && inchUnitsAttempts < MAX_INCH_UNITS_ATTEMPTS) {
+                    isInchUnitsPending = true;
+                }
 
                 listeners.forEach(l -> l.commandComplete(command));
                 if (command.isError() && !activeCommands.isEmpty()) {
@@ -797,6 +826,40 @@ public class FluidNCController implements IController, ICommunicatorListener {
             Position p = FluidNCUtils.parseProbePosition(response, getFirmwareSettings().getReportingUnits());
             listeners.forEach(l -> l.probeCoordinates(p));
         }
+    }
+
+    /**
+     * Switches the device to inches (G20) if it is pending and the device is idle with nothing else being sent.
+     * The command goes through the command queue so that its response is matched to it and the gcode state is
+     * updated. In alarm or jog state the device would reject it, so it is only sent once it reports idle.
+     */
+    private void sendInchUnitsIfIdle() {
+        if (!isInchUnitsPending || !isIdle() || !isCommOpen() || !activeCommands.isEmpty() ||
+                communicator.areActiveCommands() || communicator.isPaused()) {
+            return;
+        }
+
+        // Sent once per connection or reset, if it is rejected it will be retried a few times before leaving the units as they are
+        isInchUnitsPending = false;
+        inchUnitsAttempts++;
+        try {
+            messageService.dispatchMessage(MessageType.INFO, "*** Setting device units to inches\n");
+            inchUnitsCommand = createCommand("G20");
+            sendCommandImmediately(inchUnitsCommand);
+        } catch (Exception e) {
+            LOGGER.log(Level.WARNING, "Could not set the device units to inches", e);
+        }
+    }
+
+    /**
+     * Sets the tracked gcode state to what the device has after a reset (G0 G54 G17 G21 G90 G94), which is the same as
+     * the default gcode state. This makes the units used for the work position and for restoring the state after for
+     * instance probing match the device until it has been switched to inches.
+     */
+    private void resetParserModalState() {
+        gcodeParser.reset();
+        distanceModeCode = "G90";
+        unitsCode = "G21";
     }
 
     private void checkStreamFinished() {
