@@ -1,3 +1,26 @@
+> ## Mike's fork: what's added and changed
+>
+> This fork (branch `mikeschanges`) adds a Bluetooth jog pendant and an external Z probe for surface scanning (auto-leveling), and makes the auto-leveler safer to use.
+>
+> **Added**
+> - **Jog pendant** (`NANO_jogbox/NANO_jogbox.ino`): an ESP32 Nano with a 7x4 keypad, an SSD1306 OLED and an HC-05 Bluetooth module. It shows X/Y/Z/A, jog and live feed rate, machine state, line progress and step size, and sends jog, zero, home, run, pause and stop keys.
+> - **Serial control plugin** (`ugs-platform/ugs-platform-plugin-serialControl`): connects UGS to the pendant (finds it with a `CONREQ`/`CONACK` handshake, 9600 baud) and to the surface probe (Arduino Leonardo, 115200 baud). Probe traffic is shown in the serial control output window.
+> - **External probe for the surface scanner.** At each scan point the machine moves in X/Y only, then UGS talks to the probe:
+>   - `ZR:<x>` sets the retract distance (reply `OK ZR=<x>`)
+>   - `P` probes and returns the touch Z in inches. The first touch after a home reads `0.0`, and later touches are relative to it.
+>   - `H` retracts the probe fully (reply `homed`)
+>   - `A` aborts probe motion right away
+>
+>   Because the first point reads `0.0`, set work Z zero at the first scan point (min X / min Y) and keep Z surface at `0`.
+> - **Scan log**: the serial control window clears at the start of each scan and lists the scan settings (min/max, samples, Z surface, Z retract) above the probe replies.
+> - **Auto-level safety tests** (`AutoLevelSafetyTest`).
+>
+> **Changed**
+> - **Surface scan can be stopped**: the Scan button becomes "Stop scan", the pendant Cancel key (27) also stops it, and closing the Auto Leveler window stops it. A stop aborts the probe and feed-holds/resets the CNC. Probe over travel or a failed `ZR` retracts the probe and cancels the scan. Data that was already probed is kept if a stop happens during the final retract.
+> - **Auto-level no longer adds dangerous moves**: `G53` machine moves, homing (`G28`/`G30`), probing (`G38.x`), `G92`/`G10`/work-offset changes, tool changes and moves from an unknown position pass through unchanged. Before, a `G53 G0 Z0` retract could become a rapid down to the stock. Leveling stops after a work-frame change, and outside the scanned area the mesh uses the edge height.
+> - **Scan settings and files**: Z retract is sent to the probe at every point (allowed range 0.01–1.0). Saved `.xyz` scans carry min/max, sample counts and units in their header, and are read back from it. The scan refuses to start if Z is above Z max.
+> - **Probe Z action** checks the current Z against the probe range before probing.
+
 ![Universal G-Code Sender](https://github.com/winder/Universal-G-Code-Sender/raw/master/pictures/ugs_header.png "UGS Splash Image")
 
 

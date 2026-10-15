@@ -73,6 +73,29 @@ public class serialControl implements Runnable {
         }
     }
 
+    /**
+     * Clears the serial control output window, so it only holds the current scan's probe data.
+     */
+    public static void clearOutput() {
+        if (io == null) {
+            return;
+        }
+        try {
+            io.getOut().reset();
+        } catch (java.io.IOException ex) {
+            io.getErr().println("[Probe] Could not clear output: " + ex.getMessage());
+        }
+    }
+
+    /**
+     * Writes a line to the serial control output window.
+     */
+    public static void println(String line) {
+        if (io != null) {
+            io.getOut().println(line);
+        }
+    }
+
     /* -------------------------------------------------- */
  /*  Helper                                             */
  /* -------------------------------------------------- */

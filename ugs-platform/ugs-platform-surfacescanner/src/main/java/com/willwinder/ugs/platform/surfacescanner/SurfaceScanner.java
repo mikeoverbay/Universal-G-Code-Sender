@@ -287,6 +287,9 @@ public class SurfaceScanner {
         stopRequested.set(false);
         scanThread = Thread.currentThread();
         isScanning.set(true);
+        // Start each scan with an empty serial control window
+        serialControl.clearOutput();
+        logScanSettings();
         // Let the pendant's cancel key stop this scan
         serialControl.setScanStopHandler(pendantStopHandler);
         listeners.forEach(SurfaceScannerListener::onScannerUpdate);
@@ -309,6 +312,23 @@ public class SurfaceScanner {
             Thread.interrupted();
             listeners.forEach(SurfaceScannerListener::onScannerUpdate);
         }
+    }
+
+    /**
+     * Writes the scan settings at the top of the serial control window.
+     */
+    private void logScanSettings() {
+        Units units = getPreferredUnits();
+        serialControl.println("[Scan] Settings (" + units.abbreviation + ")");
+        serialControl.println(String.format(java.util.Locale.US, "[Scan]   min X %.4f  Y %.4f  Z %.4f",
+                settings.getMinX(), settings.getMinY(), settings.getMinZ()));
+        serialControl.println(String.format(java.util.Locale.US, "[Scan]   max X %.4f  Y %.4f  Z %.4f",
+                settings.getMaxX(), settings.getMaxY(), settings.getMaxZ()));
+        serialControl.println(String.format(java.util.Locale.US, "[Scan]   samples X %d  Y %d  (%d points)",
+                settings.getXSampleCount(), settings.getYSampleCount(),
+                settings.getXSampleCount() * settings.getYSampleCount()));
+        serialControl.println(String.format(java.util.Locale.US, "[Scan]   Z surface %.4f  Z retract %.3f",
+                settings.getZSurface(), settings.getZRetract()));
     }
 
     /**
